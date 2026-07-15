@@ -179,8 +179,6 @@ def _parse_commit(commit_data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-<<<<<<< HEAD
-=======
 # --- Ressources SmartStage ---
 
 @mcp.resource("smartstage://docs/readme", mime_type="text/markdown")
@@ -216,7 +214,6 @@ def lire_smartstage_api_endpoints() -> str:
 @mcp.resource("smartstage://docs/planning", mime_type="text/markdown")
 def lire_smartstage_planning() -> str:
     return fetch_github_doc("smartstage-docs/PLANNING_LIVRABLES.md")
->>>>>>> 2d380b7f2f35d9d77414ac116fe68885c357a781
 
 @mcp.resource("elyora://prompts/unit-test-criteria", mime_type="text/markdown")
 def lire_criteres_tests_unitaires() -> str:
@@ -581,7 +578,26 @@ def get_recent_activity(days: int = 7) -> dict[str, Any]:
                 })
 
     return {"since": since, "commits": commits, "pull_requests": recent_prs}
+# Tool de RAG:
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", "llamaindex_pipeline"))
+import config
 
+# Configurer les modèles (embedding + LLM)
+Settings.embed_model = HuggingFaceEmbedding(model_name=config.EMBED_MODEL_NAME)
+Settings.llm = GoogleGenAI(model=config.LLM_MODEL_NAME, api_key=config.GEMINI_API_KEY)
+
+# Charger l'index déjà construit par ingest.py
+storage_context = StorageContext.from_defaults(persist_dir=config.STORAGE_DIR)
+index = load_index_from_storage(storage_context)
+
+# Créer le query_engine: 
+query_engine = index.as_query_engine(similarity_top_k=5)
+
+@mcp.tool()
+def search_code(question: str) -> str:
+    """Recherche dans le code source indexé et répond à une question sur le projet."""
+    response = query_engine.query(question)
+    return str(response)
 
 with open(os.path.join(BASE_DIR, "prompts", "check_pr_health.md"), encoding="utf-8") as file:
     PR_HEALTH_TEMPLATE = file.read()
