@@ -284,6 +284,15 @@ def list_repository_tree(ref: str = "main", path_prefix: str = "") -> list[dict[
     return {"ref": ref, "path_prefix": path_prefix, "truncated": data.get("truncated", False), "entries": entries}
 
 
+@mcp.tool()
+def get_file_changes(pr_number: int, filepath: str) -> dict[str, Any]:
+    """Retourne le diff et les métadonnées d'un fichier modifié par une PR."""
+    files = _paginated(f"{API_URL}/pulls/{pr_number}/files")
+    if isinstance(files, dict):
+        return files
+    return next((file for file in files if file["filename"] == filepath), {"error": "file_not_found"})
+
+
 def _check_merge_conflicts(pr_number: int) -> dict[str, Any]:
     """Retourne l'état de fusion calculé par GitHub (utilisé par suggest_conflict_resolution)."""
     pr = _get_json(f"{API_URL}/pulls/{pr_number}")
@@ -484,6 +493,13 @@ def get_commit_history(ref: str = "main", path: str = "", limit: int = 20) -> li
     if not isinstance(data, list):
         return {"error": "unexpected_github_response", "detail": data}
     return [_parse_commit(item) for item in data]
+
+
+@mcp.tool()
+def get_file_history(filepath: str, limit: int = 20) -> list[dict[str, Any]] | dict[str, Any]:
+    """Historique des commits ayant modifié un fichier précis : qui l'a changé et quand.
+    Combinez avec get_commit_details(sha) pour voir exactement quelles lignes ont changé."""
+    return get_commit_history(path=filepath, limit=limit)
 
 
 @mcp.tool()
