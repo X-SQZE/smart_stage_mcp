@@ -352,8 +352,6 @@ index = load_index_from_storage(storage_context)
 # Créer le query_engine: 
 query_engine = index.as_query_engine(similarity_top_k=5)
 
-mcp = FastMCP("code-analyzer")
-
 @mcp.tool()
 def search_code(question: str) -> str:
     """Recherche dans le code source indexé et répond à une question sur le projet."""
