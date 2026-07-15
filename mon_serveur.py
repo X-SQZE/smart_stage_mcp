@@ -126,10 +126,12 @@ def lire_ui_guidelines() -> str:
     return fetch_github_doc("ressources/ui_guidelines.md")
 
 
-@mcp.resource("elyora://prompts/pr-health-criteria", mime_type="text/markdown")
-def lire_criteres_pr_health() -> str:
-    return fetch_github_doc("prompts/pr_health_criteria.md")
 
+@mcp.resource("elyora://prompts/unit-test-criteria", mime_type="text/markdown")
+def lire_criteres_tests_unitaires() -> str:
+    """Critères de référence pour juger la pertinence d'un test unitaire."""
+    with open(os.path.join(BASE_DIR, "prompts", "unit_test_criteria.md"), encoding="utf-8") as f:
+        return f.read()
 
 @mcp.tool()
 def get_pr_metadata(pr_number: int) -> dict[str, Any]:
@@ -300,6 +302,20 @@ def suggest_conflict_resolution(pr_number: int) -> dict[str, Any]:
             "files_likely_conflicting": [] if isinstance(files, dict) else [file["filename"] for file in files],
             "suggestion": "Rebasez la branche source sur la branche cible et résolvez les conflits avec validation humaine."}
 
+@mcp.tool()
+def suggest_unit_tests(file_path: str) -> str:
+    """
+    Propose des cas de tests unitaires pertinents pour un fichier donné,
+    en se basant sur la logique métier du code indexé (fonctions, cas limites,
+    dépendances). Utile pour identifier des tests manquants au-delà des règles
+    statiques de Sonar (ex: cas métier spécifiques, edge cases logiques).
+    """
+    response = query_engine.query(
+        f"Analyse le fichier {file_path} et propose une liste de cas de tests "
+        f"unitaires pertinents (nom du test, ce qu'il vérifie, cas limites à couvrir). "
+        f"Concentre-toi sur la logique métier, pas juste la syntaxe."
+    )
+    return str(response)
 
 @mcp.tool()
 def guide_contributor(intent: str) -> dict[str, Any]:
@@ -373,6 +389,12 @@ def check_pr_health(pr_number: str, strictness_level: str = "standard", addition
 def guide_contributor_prompt(intent: str) -> str:
     return GUIDE_CONTRIBUTOR_TEMPLATE.format(intent=intent)
 
+with open(os.path.join(BASE_DIR, "prompts", "suggest_unit_tests.md"), encoding="utf-8") as file:
+    SUGGEST_UNIT_TESTS_TEMPLATE = file.read()
+
+@mcp.prompt(name="suggest-unit-tests", description="Propose des tests unitaires pertinents pour un fichier du dépôt")
+def suggest_unit_tests_prompt(file_path: str) -> str:
+    return SUGGEST_UNIT_TESTS_TEMPLATE.format(file_path=file_path)
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")
