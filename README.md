@@ -1,0 +1,1 @@
+# smart_stage_mcp
