@@ -5,13 +5,28 @@ from __future__ import annotations
 import base64
 import os
 import re
+import time
 from datetime import datetime, timedelta
 from typing import Any
-
+import sys
+from tools.sonar_tools import (
+    run_sonar_analysis_on_pr,
+    wait_for_sonar_analysis,
+    get_sonar_issues,
+    read_from_cache,
+    save_to_cache,
+    delete_sonar_project,
+    clear_cache_entry,
+)
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+from llama_index.llms.google_genai import GoogleGenAI
+from llama_index.core import StorageContext, load_index_from_storage, Settings
+from dotenv import load_dotenv
 import requests
 from mcp.server.fastmcp import FastMCP
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(BASE_DIR, ".env"))
 OWNER = os.getenv("GITHUB_OWNER", "ironkik123")
 REPO = os.getenv("GITHUB_REPO", "PFA")
 API_URL = f"https://api.github.com/repos/{OWNER}/{REPO}"
@@ -232,6 +247,59 @@ def get_pr_metadata(pr_number: int) -> dict[str, Any]:
             "head_sha": pr["head"]["sha"], "labels": [label["name"] for label in pr["labels"]],
             "state": pr["state"], "draft": pr["draft"]}
 
+from tools.sonar_tools import get_sonar_issues
+
+@mcp.tool()
+def get_pr_sonar_issues(pr_number: int, types: list[str] = None,
+                         severities: list[str] = None) -> list[dict]:
+    """Liste les issues Sonar d'une PR. Filtre optionnel par type (VULNERABILITY, BUG, CODE_SMELL, SECURITY_HOTSPOT) et/ou sévérité."""
+    return get_sonar_issues(pr_number, severities=severities, types=types, limit=20)
+
+@mcp.tool()
+def run_sonar_scan(pr_number: int, force_rescan: bool = False) -> dict:
+    """
+    Lance une analyse SonarCloud sur le code d'une PR et retourne le résultat
+    du quality gate. Utilise le cache si un scan a déjà été fait sur le même commit.
+    force_rescan=True : supprime le projet SonarQube existant et le cache
+    avant de relancer, pour éviter une ancienne baseline après un changement
+    de profil ou de quality gate.
+    """
+    metadata = get_pr_metadata(pr_number)
+    if isinstance(metadata, dict) and "error" in metadata:
+        return metadata
+
+    head_sha = metadata["head_sha"]
+    pr_branch = metadata["source_branch"]
+
+    if force_rescan:
+        delete_sonar_project(pr_number)
+        clear_cache_entry(pr_number)
+    else:
+        cached = read_from_cache(pr_number, head_sha)
+        if cached:
+            return {"status": "cached", "result": cached}
+
+    scan_result = run_sonar_analysis_on_pr(pr_number, head_sha, pr_branch)
+    if scan_result["status"] == "error":
+        return scan_result
+
+    ce_task_id = scan_result.get("ce_task_id")
+    if not ce_task_id:
+        return {"status": "error", "message": "Aucun ce_task_id retourné par le scan."}
+
+    gate_result = wait_for_sonar_analysis(pr_number, ce_task_id)
+    if gate_result["status"] != "ready":
+        return gate_result
+
+    project_status = gate_result["result"]
+    response = {"status": "ready", "quality_gate": project_status["status"]}
+
+    if project_status["status"] == "ERROR":
+        response["issues"] = get_sonar_issues(pr_number, severities=["CRITICAL", "BLOCKER"])
+
+    save_to_cache(pr_number, head_sha, response)
+    return response
+
 
 @mcp.tool()
 def list_pr_comments(pr_number: int) -> list[Any] | dict[str, Any]:
@@ -374,14 +442,9 @@ def suggest_conflict_resolution(pr_number: int) -> dict[str, Any]:
             "suggestion": "Rebasez la branche source sur la branche cible et résolvez les conflits avec validation humaine."}
 
 @mcp.tool()
-def suggest_unit_tests(file_path: str) -> str:
-    """
-    Propose des cas de tests unitaires pertinents pour un fichier donné,
-    en se basant sur la logique métier du code indexé (fonctions, cas limites,
-    dépendances). Utile pour identifier des tests manquants au-delà des règles
-    statiques de Sonar (ex: cas métier spécifiques, edge cases logiques).
-    """
-    response = query_engine.query(
+async def suggest_unit_tests(file_path: str) -> str:
+    """..."""
+    response = await query_engine.aquery(
         f"Analyse le fichier {file_path} et propose une liste de cas de tests "
         f"unitaires pertinents (nom du test, ce qu'il vérifie, cas limites à couvrir). "
         f"Concentre-toi sur la logique métier, pas juste la syntaxe."
@@ -579,24 +642,24 @@ def get_recent_activity(days: int = 7) -> dict[str, Any]:
 
     return {"since": since, "commits": commits, "pull_requests": recent_prs}
 # Tool de RAG:
-sys.path.append(os.path.join(os.path.dirname(__file__), "..", "llamaindex_pipeline"))
-import config
+sys.path.append(os.path.join(os.path.dirname(__file__),"llamaindex_pipeline"))
+import configu
 
 # Configurer les modèles (embedding + LLM)
-Settings.embed_model = HuggingFaceEmbedding(model_name=config.EMBED_MODEL_NAME)
-Settings.llm = GoogleGenAI(model=config.LLM_MODEL_NAME, api_key=config.GEMINI_API_KEY)
+Settings.embed_model = HuggingFaceEmbedding(model_name=configu.EMBED_MODEL_NAME)
+Settings.llm = GoogleGenAI(model=configu.LLM_MODEL_NAME, api_key=configu.GEMINI_API_KEY)
 
 # Charger l'index déjà construit par ingest.py
-storage_context = StorageContext.from_defaults(persist_dir=config.STORAGE_DIR)
+storage_context = StorageContext.from_defaults(persist_dir=configu.STORAGE_DIR)
 index = load_index_from_storage(storage_context)
 
 # Créer le query_engine: 
 query_engine = index.as_query_engine(similarity_top_k=5)
 
 @mcp.tool()
-def search_code(question: str) -> str:
+async def search_code(question: str) -> str:
     """Recherche dans le code source indexé et répond à une question sur le projet."""
-    response = query_engine.query(question)
+    response = await query_engine.aquery(question)
     return str(response)
 
 with open(os.path.join(BASE_DIR, "prompts", "check_pr_health.md"), encoding="utf-8") as file:
@@ -620,6 +683,13 @@ with open(os.path.join(BASE_DIR, "prompts", "suggest_unit_tests.md"), encoding="
 @mcp.prompt(name="suggest-unit-tests", description="Propose des tests unitaires pertinents pour un fichier du dépôt")
 def suggest_unit_tests_prompt(file_path: str) -> str:
     return SUGGEST_UNIT_TESTS_TEMPLATE.format(file_path=file_path)
+
+with open(os.path.join(BASE_DIR, "prompts", "suggest_sonar_fixes.md"), encoding="utf-8") as file:
+    SUGGEST_SONAR_FIXES_TEMPLATE = file.read()
+
+@mcp.prompt(name="suggest-sonar-fixes", description="Propose des solutions concrètes pour résoudre les problèmes Sonar détectés sur une PR")
+def suggest_sonar_fixes_prompt(pr_number: str, severity_filter: str = "") -> str:
+    return SUGGEST_SONAR_FIXES_TEMPLATE.format(pr_number=pr_number, severity_filter=severity_filter)
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")

@@ -1,9 +1,8 @@
 from llama_index.core import StorageContext, load_index_from_storage, Settings
-from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-from llama_index.llms.google_genai import GoogleGenAI
 import config
 import sys
-
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+from llama_index.llms.google_genai import GoogleGenAI
 Settings.embed_model = HuggingFaceEmbedding(model_name=config.EMBED_MODEL_NAME)
 Settings.llm = GoogleGenAI(model=config.LLM_MODEL_NAME, api_key=config.GEMINI_API_KEY)
 

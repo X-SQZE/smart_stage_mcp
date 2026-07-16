@@ -1,0 +1,6 @@
+sonar.projectKey={PROJECT_KEY}
+sonar.sources=AppPHP/ELYORA,AppJAVA/AgenceVoyage3/src,AppC++/projetfinal
+sonar.exclusions=**/bin/**,**/obj/**,**/*.class,**/*.o,**/*.exe,**/*.dll,**/*.jar,**/image/**
+sonar.java.binaries=AppJAVA/AgenceVoyage3/bin
+sonar.host.url=http://localhost:9000
+sonar.token={SONAR_TOKEN}

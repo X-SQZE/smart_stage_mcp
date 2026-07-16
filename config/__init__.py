@@ -1,0 +1,5 @@
+SONAR_TOKEN = "sqa_854d4f2701e87bec0c5939ae28e2ec809f842424"
+PROJECT_KEY = "projet-synthese-scan"
+ORG_KEY = "elyora-pr-judge"
+GITHUB_REPO = "chdaouihamza/projet_synthese"
+SONAR_HOST = "http://localhost:9000"
