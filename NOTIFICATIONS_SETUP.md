@@ -1,33 +1,33 @@
-# Notification email a chaque push sur main
+# Notification email sur PR mergee (main)
 
 ## Fichiers a ajouter au repo
-- `.github/workflows/notify-on-push.yml`
-- `scripts/notify_commit_email.py`
+- `.github/workflows/notify-on-pr-merged.yml`
+- `scripts/notify_pr_merged_email.py`
+(supprime les anciens `notify-on-push.yml` / `notify_commit_email.py` si presents)
+
+## Declencheur
+`pull_request` avec `types: [closed]` + condition `if: github.event.pull_request.merged == true`.
+Une PR fermee sans merge (rejetee) ne declenche rien — le job entier est skip.
 
 ## Secrets GitHub a configurer
-Dans **Settings > Secrets and variables > Actions** du repo `smart_stage_mcp` :
+| Secret          | Usage                                    |
+|------------------|-------------------------------------------|
+| `SMTP_HOST`     | serveur SMTP (ex. `smtp.gmail.com`)       |
+| `SMTP_PORT`     | ex. `587`                                 |
+| `SMTP_USER`     | compte SMTP                                |
+| `SMTP_PASS`     | mot de passe d'application                 |
+| `EMAIL_FROM`    | adresse d'expedition                       |
+| `DEV_EMAILS`    | emails de l'equipe, separes par des virgules |
+| `GEMINI_API_KEY`| optionnel, pour le resume IA (deja utilise ailleurs dans le projet) |
 
-| Secret        | Exemple                          |
-|---------------|-----------------------------------|
-| `SMTP_HOST`   | `smtp.gmail.com`                  |
-| `SMTP_PORT`   | `587`                             |
-| `SMTP_USER`   | `votre.compte@gmail.com`          |
-| `SMTP_PASS`   | mot de passe d'application (pas le mot de passe normal) |
-| `EMAIL_FROM`  | `notifications@elyora.dev`        |
-| `DEV_EMAILS`  | `dev1@mail.com,dev2@mail.com,dev3@mail.com` |
+`GITHUB_TOKEN` est fourni automatiquement par GitHub Actions, rien a configurer.
 
-Pour Gmail, il faut un "mot de passe d'application" (App Password), pas le mot de passe du compte.
+## Comportement du resume IA
+Le script appelle Gemini pour generer 2-4 phrases a partir du titre, de la description
+et des fichiers modifies. Si `GEMINI_API_KEY` est absent ou l'appel echoue, un resume
+de secours (sans IA) est genere automatiquement — le workflow ne casse jamais pour ca.
 
-## Ce que recoit l'equipe
-Un email par push, avec une section par commit :
-- developpeur (nom + email)
-- date/heure
-- fichiers modifies
-- diff (le code avant/apres)
-
-## A savoir
-- Le diff est tronque a 200 lignes par commit pour eviter des emails enormes — ajustable via `MAX_DIFF_LINES_PER_FILE` dans le script.
-- Marche pour un push avec plusieurs commits d'un coup (boucle sur `event["commits"]`).
-
-## Remarque de securite (hors sujet de cette demande)
-`config/__init__.py` contient un `SONAR_TOKEN` en clair, commite dans le repo public. Ce token devrait etre revoque et deplace dans un secret / `.env` non versionne.
+## Structure du script
+`notify_pr_merged_email.py` est decoupe en etapes independantes :
+`load_pr_event` -> `extract_pr_info` -> `get_changed_files` -> `generate_summary`
+-> `build_email` -> `send_email`.
