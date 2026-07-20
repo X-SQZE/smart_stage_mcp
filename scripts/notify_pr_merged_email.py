@@ -230,7 +230,7 @@ Resume :
 
 def send_email(subject: str, text_body: str, html_body: str) -> None:
     smtp_host = os.environ["SMTP_HOST"]
-    smtp_port = int(os.environ.get("SMTP_PORT", "587"))
+    smtp_port = int(os.environ.get("SMTP_PORT") or "587")
     smtp_user = os.environ["SMTP_USER"]
     smtp_pass = os.environ["SMTP_PASS"]
     email_from = os.environ.get("EMAIL_FROM", smtp_user)
