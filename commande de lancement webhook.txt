@@ -1,0 +1,32 @@
+instalation uvicorn:
+pip install fastapi uvicorn --break-system-packages
+lancement:
+uvicorn webhook_server:app --reload --port 8000
+1. Installer ngrok (si pas déjà fait)
+télécharge depuis https://ngrok.com/download
+
+2. Créer un compte et configurer le token
+Sur https://dashboard.ngrok.com/get-started/your-authtoken, récupère ton token puis :
+
+bash
+ngrok config add-authtoken TON_TOKEN
+
+3. Lancer ngrok sur le port de ton serveur local
+Si ton serveur (Express, Flask, PHP, etc.) tourne par exemple sur le port 3000 :
+
+bash
+ngrok http 3000
+
+4. Récupérer l'URL publique
+ngrok affiche quelque chose comme :
+
+Forwarding   https://a1b2-c3d4.ngrok-free.app -> http://localhost:3000
+
+C'est cette URL https://a1b2-c3d4.ngrok-free.app que tu donnes comme endpoint de webhook (GitHub, Jira, Stripe, etc.).
+
+5. Configurer le webhook côté service
+Ajoute l'URL ngrok + le chemin de ta route dans les paramètres webhook du service (ex. https://a1b2-c3d4.ngrok-free.app/webhook/github).
+Points utiles :
+Interface de debug locale sur http://127.0.0.1:4040 — tu y vois toutes les requêtes reçues, très pratique pour rejouer un webhook en debug.
+Avec le plan gratuit, l'URL change à chaque redémarrage. Pour une URL fixe, il faut un domaine réservé (ngrok http --domain=ton-domaine.ngrok-free.app 3000, dispo aussi en gratuit avec un domaine statique).
+Pense à couper ngrok une fois les tests finis, l'URL reste sinon accessible publiquement.

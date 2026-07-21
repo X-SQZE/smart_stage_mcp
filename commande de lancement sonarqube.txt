@@ -1,0 +1,3 @@
+commande de lancement sonarqube:
+acces au fichier:cd C:\Users\Lenovo\Desktop\agent_git
+lancement du serveur localement:StartSonar.bat
