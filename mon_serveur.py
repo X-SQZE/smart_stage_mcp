@@ -24,7 +24,7 @@ from llama_index.core import StorageContext, load_index_from_storage, Settings
 from dotenv import load_dotenv
 import requests
 from mcp.server.fastmcp import FastMCP
-
+from requests.auth import HTTPBasicAuth
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 OWNER = os.getenv("GITHUB_OWNER", "ironkik123")
@@ -32,7 +32,10 @@ REPO = os.getenv("GITHUB_REPO", "PFA")
 API_URL = f"https://api.github.com/repos/{OWNER}/{REPO}"
 TIMEOUT_SECONDS = 20
 RESOURCE_CACHE: dict[str, str] = {}
-
+JIRA_BASE_URL = os.environ.get("JIRA_BASE_URL")
+JIRA_EMAIL = os.environ.get("JIRA_EMAIL")
+JIRA_API_TOKEN = os.environ.get("JIRA_API_TOKEN")
+JIRA_KEY_REGEX = re.compile(r"([A-Z][A-Z0-9]+-\d+)")
 mcp = FastMCP(
     "SmartStage MCP",
     instructions=(
@@ -192,7 +195,65 @@ def _parse_commit(commit_data: dict[str, Any]) -> dict[str, Any]:
         "message": (commit.get("message") or "").split("\n")[0],
         "url": commit_data.get("html_url"),
     }
+def _jira_auth():
+    return HTTPBasicAuth(JIRA_EMAIL, JIRA_API_TOKEN)
 
+def _jira_get_transitions(issue_key: str):
+    """Récupère la liste des transitions possibles pour un ticket (ex: To Do, In Progress, Done)."""
+    url = f"{JIRA_BASE_URL}/rest/api/3/issue/{issue_key}/transitions"
+    response = requests.get(url, auth=_jira_auth(), headers={"Accept": "application/json"})
+    response.raise_for_status()
+    return response.json()["transitions"]  # liste de {id, name}
+
+def _jira_transition_issue(issue_key: str, target_status_name: str):
+    """Fait passer un ticket vers le statut cible en cherchant l'id de transition correspondant."""
+    transitions = _jira_get_transitions(issue_key)
+    match = next(
+        (t for t in transitions if t["name"].lower() == target_status_name.lower()),
+        None
+    )
+    if not match:
+        noms_dispo = ", ".join(t["name"] for t in transitions)
+        raise ValueError(
+            f"Aucune transition '{target_status_name}' trouvée pour {issue_key}. "
+            f"Transitions disponibles : {noms_dispo}"
+        )
+
+    url = f"{JIRA_BASE_URL}/rest/api/3/issue/{issue_key}/transitions"
+    response = requests.post(
+        url,
+        auth=_jira_auth(),
+        json={"transition": {"id": match["id"]}},
+        headers={"Content-Type": "application/json"},
+    )
+    response.raise_for_status()
+
+def _jira_add_comment(issue_key: str, text: str):
+    """Ajoute un commentaire texte simple sur un ticket."""
+    url = f"{JIRA_BASE_URL}/rest/api/3/issue/{issue_key}/comment"
+    body = {
+        "body": {
+            "type": "doc",
+            "version": 1,
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": text}]}],
+        }
+    }
+    response = requests.post(
+        url,
+        auth=_jira_auth(),
+        json=body,
+        headers={"Content-Type": "application/json"},
+    )
+    response.raise_for_status()
+def extraire_cle_ticket(titre_pr: str, nom_branche: str) -> str | None:
+    """Cherche une clé Jira (ex: KAN-12) dans le titre de la PR, puis dans le nom de branche."""
+    for source in [titre_pr, nom_branche]:
+        if not source:
+            continue
+        match = JIRA_KEY_REGEX.search(source)
+        if match:
+            return match.group(1)
+    return None
 
 # --- Ressources SmartStage ---
 
@@ -235,6 +296,7 @@ def lire_criteres_tests_unitaires() -> str:
     """Critères de référence pour juger la pertinence d'un test unitaire."""
     with open(os.path.join(BASE_DIR, "prompts", "unit_test_criteria.md"), encoding="utf-8") as f:
         return f.read()
+# --- tools SmartStage ---
 
 @mcp.tool()
 def get_pr_metadata(pr_number: int) -> dict[str, Any]:
@@ -248,6 +310,168 @@ def get_pr_metadata(pr_number: int) -> dict[str, Any]:
             "state": pr["state"], "draft": pr["draft"]}
 
 from tools.sonar_tools import get_sonar_issues
+def extraire_cle_ticket(titre_pr: str, nom_branche: str) -> str | None:
+    """Cherche une clé Jira (ex: KAN-12) dans le titre de la PR, puis dans le nom de branche."""
+    for source in [titre_pr, nom_branche]:
+        if not source:
+            continue
+        match = JIRA_KEY_REGEX.search(source)
+        if match:
+            return match.group(1)
+    return None
+@mcp.tool()
+def jira_verifier_blocage(issue_key: str) -> dict:
+    """
+    Vérifie si un ticket Jira est marqué comme bloqué par un administrateur
+    (via label ou statut dédié). À appeler EN PREMIER, avant toute vérification
+    de CI/Sonar, pour éviter de lancer des scans coûteux sur un ticket gelé.
+    """
+    BLOCKED_LABELS = {"blocked", "do-not-touch", "bloqué"}
+    BLOCKED_STATUSES = {"blocked", "on hold", "bloqué", "gelé"}
+
+    url = f"{JIRA_BASE_URL}/rest/api/3/issue/{issue_key}"
+    try:
+        response = requests.get(
+            url,
+            auth=(JIRA_EMAIL, JIRA_API_TOKEN),
+            headers={"Accept": "application/json"},
+        )
+        response.raise_for_status()
+        data = response.json()
+    except Exception as e:
+        return {"issue_key": issue_key, "blocked": False, "error": str(e)}
+
+    status = data["fields"]["status"]["name"]
+    labels = data["fields"].get("labels", [])
+
+    is_blocked = (
+    status.lower() in BLOCKED_STATUSES
+    or any(label.lower() in BLOCKED_LABELS for label in labels)
+    )
+
+    return {
+        "issue_key": issue_key,
+        "blocked": is_blocked,
+        "status": status,
+        "labels": labels,
+    }    
+@mcp.tool()
+def jira_lister_transitions(issue_key: str) -> dict:
+    """Liste les statuts vers lesquels un ticket Jira peut actuellement transitionner.
+    Utile pour vérifier le nom exact d'un statut avant de l'utiliser (ex: 'Done', 'In Review')."""
+    transitions = _jira_get_transitions(issue_key)
+    return {"issue_key": issue_key, "transitions_disponibles": [t["name"] for t in transitions]}
+
+
+@mcp.tool()
+def jira_transitionner_ticket(issue_key: str, statut_cible: str) -> dict:
+    """Fait passer un ticket Jira vers un statut donné (ex: 'Done', 'In Progress').
+    issue_key : la clé du ticket, ex: 'KAN-1'
+    statut_cible : le nom exact du statut visé, ex: 'Done'"""
+    _jira_transition_issue(issue_key, statut_cible)
+    return {"issue_key": issue_key, "nouveau_statut": statut_cible, "status": "ok"}
+@mcp.tool()
+def jira_verifier_et_cloturer(issue_key: str, pr_number: int, pr_url: str) -> dict:
+    """Vérifie qu'une PR est propre (CI verte + Quality Gate Sonar OK) avant de clôturer
+    le ticket Jira lié. Si tout est vert, transitionne vers 'Terminé' et commente.
+    Si un problème est détecté, laisse le ticket en l'état et commente la raison du blocage."""
+
+    ci_status = get_ci_status(pr_number)  # réutilise ton tool existant
+    sonar_result = run_sonar_scan(pr_number)  # réutilise ton tool existant
+
+    ci_ok = ci_status.get("status") == "success" or ci_status.get("conclusion") == "success"
+    sonar_ok = sonar_result.get("result", {}).get("quality_gate") == "OK"
+
+    if ci_ok and sonar_ok:
+        _jira_transition_issue(issue_key, "Terminé")
+        _jira_add_comment(
+            issue_key,
+            f"PR #{pr_number} mergée ({pr_url}) : CI verte, Quality Gate OK. Ticket clôturé automatiquement."
+        )
+        return {"issue_key": issue_key, "action": "cloture", "ci_ok": ci_ok, "sonar_ok": sonar_ok}
+    else:
+        raisons = []
+        if not ci_ok:
+            raisons.append("CI en échec")
+        if not sonar_ok:
+            issues = sonar_result.get("result", {}).get("issues", [])
+            bloquants = [i for i in issues if i.get("severity") == "BLOCKER"]
+            raisons.append(f"Quality Gate en erreur ({len(bloquants)} issue(s) bloquante(s))")
+
+        _jira_add_comment(
+            issue_key,
+            f"PR #{pr_number} ({pr_url}) non clôturée automatiquement : {', '.join(raisons)}."
+        )
+        return {"issue_key": issue_key, "action": "bloque", "raisons": raisons, "ci_ok": ci_ok, "sonar_ok": sonar_ok}
+
+@mcp.tool()
+def jira_commenter_ticket(issue_key: str, commentaire: str) -> dict:
+    """Ajoute un commentaire texte sur un ticket Jira.
+    issue_key : la clé du ticket, ex: 'KAN-1'
+    commentaire : le texte à poster"""
+    _jira_add_comment(issue_key, commentaire)
+    return {"issue_key": issue_key, "status": "commentaire ajouté"}
+
+
+@mcp.tool()
+def jira_cloturer_ticket_pr(issue_key: str, pr_number: int, pr_url: str) -> dict:
+    """Clôture un ticket Jira suite au merge d'une PR validée : transitionne vers 'Done'
+    et ajoute un commentaire de traçabilité en une seule action.
+    À utiliser une fois qu'on a vérifié que la PR est propre (CI verte, Sonar OK, review approuvée)."""
+    _jira_transition_issue(issue_key, "Terminé")
+    _jira_add_comment(issue_key, f"PR #{pr_number} mergée et validée : {pr_url}. Ticket clôturé automatiquement.")
+    return {"issue_key": issue_key, "statut": "Done", "pr_number": pr_number}
+
+import logging
+
+logger = logging.getLogger(__name__)
+
+def valider_ticket_existe(issue_key: str) -> bool:
+    """Vérifie que le ticket existe réellement dans Jira avant d'agir dessus."""
+    url = f"{JIRA_BASE_URL}/rest/api/3/issue/{issue_key}"
+    response = requests.get(url, auth=_jira_auth())
+    return response.status_code == 200
+
+
+@mcp.tool()
+def traiter_merge_pr(titre_pr: str, nom_branche: str, pr_number: int, pr_url: str) -> dict:
+    """Point d'entrée principal appelé après le merge d'une PR : détecte le ticket Jira lié,
+    valide qu'il existe, vérifie qu'il n'est pas bloqué, puis lance la vérification CI/Sonar
+    avant clôture. Si aucun ticket n'est trouvé, n'existe pas, ou est bloqué, ignore proprement
+    et prévient sur la PR/le ticket."""
+
+    issue_key = extraire_cle_ticket(titre_pr, nom_branche)
+
+    if not issue_key:
+        logger.warning(f"PR #{pr_number} mergée sans ticket Jira détecté ({pr_url})")
+        post_pr_comment(
+            pr_number,
+            "Aucun ticket Jira détecté dans le titre ou la branche. "
+            "Le ticket ne sera pas clôturé automatiquement."
+        )
+        return {"status": "ignoré", "raison": "aucun ticket Jira trouvé dans la PR"}
+
+    if not valider_ticket_existe(issue_key):
+        logger.warning(f"PR #{pr_number} référence {issue_key}, mais ce ticket n'existe pas")
+        post_pr_comment(
+            pr_number,
+            f"Le ticket {issue_key} référencé dans cette PR n'existe pas dans Jira. "
+            "Vérifie la clé du ticket."
+        )
+        return {"status": "ignoré", "raison": f"{issue_key} n'existe pas dans Jira"}
+
+    blocage = jira_verifier_blocage(issue_key)
+    if blocage.get("blocked"):
+        logger.warning(f"PR #{pr_number} liée à {issue_key}, mais ce ticket est marqué bloqué (statut: {blocage.get('status')})")
+        post_pr_comment(
+            pr_number,
+            f"Le ticket {issue_key} est actuellement bloqué (statut: {blocage.get('status')}). "
+            "Aucune action automatique (CI/Sonar/clôture) n'a été effectuée. "
+            "Un administrateur doit débloquer le ticket avant tout traitement automatique."
+        )
+        return {"status": "bloqué", "issue_key": issue_key, "statut_jira": blocage.get("status")}
+
+    return jira_verifier_et_cloturer(issue_key, pr_number, pr_url)
 
 @mcp.tool()
 def get_pr_sonar_issues(pr_number: int, types: list[str] = None,
