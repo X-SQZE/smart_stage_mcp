@@ -27,8 +27,8 @@ from mcp.server.fastmcp import FastMCP
 from requests.auth import HTTPBasicAuth
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
-OWNER = os.getenv("GITHUB_OWNER", "ironkik123")
-REPO = os.getenv("GITHUB_REPO", "PFA")
+OWNER = os.getenv("REPO_OWNER", "ironkik123")
+REPO = os.getenv("REPO_NAME", "PFA")
 API_URL = f"https://api.github.com/repos/{OWNER}/{REPO}"
 TIMEOUT_SECONDS = 20
 RESOURCE_CACHE: dict[str, str] = {}

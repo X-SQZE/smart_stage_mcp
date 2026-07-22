@@ -7,7 +7,7 @@ import zipfile
 import io
 import requests
 import re
-from config import SONAR_TOKEN, PROJECT_KEY, ORG_KEY, GITHUB_REPO, SONAR_HOST
+from config import SONAR_TOKEN, PROJECT_KEY, ORG_KEY, REPO_NAME, SONAR_HOST
 
 CACHE_FILE = "sonar_cache.json"
 
