@@ -15,3 +15,4 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STORAGE_DIR = os.path.join(BASE_DIR, "storage")
 REQUIRED_EXTS = [".py", ".js", ".ts", ".java", ".cpp", ".c", ".go", ".rs", ".php", ".rb", ".md", ".txt"]
 EXCLUDE_DIRS = ["node_modules", ".git", "venv", "__pycache__"]
+CHROMA_COLLECTION_NAME = "CodeX_Repo"
