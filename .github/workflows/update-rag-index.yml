@@ -1,0 +1,56 @@
+name: Mise à jour incrémentale de l'index RAG
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  update-index:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout du code (main)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Récupérer la base Chroma existante (branche chroma-index)
+        run: |
+          git fetch origin chroma-index
+          git worktree add ../chroma-index-wt origin/chroma-index
+          rm -rf llamaindex_pipeline/storage
+          cp -r ../chroma-index-wt/llamaindex_pipeline/storage llamaindex_pipeline/storage
+
+      - name: Installer Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Installer les dépendances
+        run: |
+          pip install chromadb llama-index llama-index-vector-stores-chroma \
+                      llama-index-embeddings-huggingface llama-index-llms-google-genai \
+                      llama-index-readers-github python-dotenv requests
+
+      - name: Lister les fichiers modifiés dans ce push
+        id: changed_files
+        run: |
+          git diff --name-status ${{ github.event.before }} ${{ github.event.after }} > changed_files.txt
+          cat changed_files.txt
+
+      - name: Réindexation incrémentale
+        env:
+          GITHUB_TOKEN_RAG: ${{ secrets.RAG_GITHUB_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          python llamaindex_pipeline/incremental_update.py changed_files.txt
+
+      - name: Commit et push de la base mise à jour
+        run: |
+          git config user.name "rag-bot"
+          git config user.email "rag-bot@users.noreply.github.com"
+          cd ../chroma-index-wt
+          rm -rf llamaindex_pipeline/storage
+          cp -r ../$(basename ${{ github.workspace }})/llamaindex_pipeline/storage llamaindex_pipeline/storage
+          git add llamaindex_pipeline/storage
+          git commit -m "Mise à jour auto de l'index RAG (commit ${{ github.sha }})" || echo "Rien à commit"
+          git push origin HEAD:chroma-index
