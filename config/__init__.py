@@ -1,6 +1,6 @@
 SONAR_TOKEN = "sqa_854d4f2701e87bec0c5939ae28e2ec809f842424"
 PROJECT_KEY = "projet-synthese-scan"
 ORG_KEY = "elyora-pr-judge"
-REPO_NAME = "X-SQZE/smart_stage_mcp"
+REPO_NAME = "chdaouihamza/projet_synthese"
 SONAR_HOST = "http://localhost:9000"
 GITHUB_WEBHOOK_SECRET = "c305500394066d4e3c63d28e03a47623b4c1d6eb"
