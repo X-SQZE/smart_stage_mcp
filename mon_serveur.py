@@ -987,6 +987,7 @@ def suggest_sonar_fixes_prompt(pr_number: str, severity_filter: str = "") -> str
 # même instance `mcp`. Importé en dernier pour que mcp/index/Settings
 # soient déjà initialisés. Ne crée pas de nouveau serveur.
 import optimization_tools  # noqa: E402,F401
+import planner_tools
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")
