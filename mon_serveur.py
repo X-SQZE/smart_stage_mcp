@@ -988,6 +988,7 @@ def suggest_sonar_fixes_prompt(pr_number: str, severity_filter: str = "") -> str
 # soient déjà initialisés. Ne crée pas de nouveau serveur.
 import optimization_tools  # noqa: E402,F401
 import planner_tools
+import style_tools
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")
