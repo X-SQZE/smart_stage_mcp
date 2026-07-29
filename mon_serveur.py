@@ -20,15 +20,17 @@ from tools.sonar_tools import (
 )
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.google_genai import GoogleGenAI
-from llama_index.core import StorageContext, load_index_from_storage, Settings
+from llama_index.core import Settings, VectorStoreIndex
+from llama_index.vector_stores.chroma import ChromaVectorStore
+import chromadb
 from dotenv import load_dotenv
 import requests
 from mcp.server.fastmcp import FastMCP
 from requests.auth import HTTPBasicAuth
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
-OWNER = os.getenv("REPO_OWNER", "ironkik123")
-REPO = os.getenv("REPO_NAME", "PFA")
+OWNER = os.getenv("REPO_OWNER")
+REPO = os.getenv("REPO_NAME")
 API_URL = f"https://api.github.com/repos/{OWNER}/{REPO}"
 TIMEOUT_SECONDS = 20
 RESOURCE_CACHE: dict[str, str] = {}
@@ -873,17 +875,111 @@ import configu
 Settings.embed_model = HuggingFaceEmbedding(model_name=configu.EMBED_MODEL_NAME)
 Settings.llm = GoogleGenAI(model=configu.LLM_MODEL_NAME, api_key=configu.GEMINI_API_KEY)
 
-# Charger l'index déjà construit par ingest.py
-storage_context = StorageContext.from_defaults(persist_dir=configu.STORAGE_DIR)
-index = load_index_from_storage(storage_context)
+# Charger l'index depuis ChromaDB (base synchronisée via chroma-index)
+chroma_client = chromadb.PersistentClient(path=configu.STORAGE_DIR)
+chroma_collection = chroma_client.get_or_create_collection(configu.CHROMA_COLLECTION_NAME)
+vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
+index = VectorStoreIndex.from_vector_store(vector_store)
 
-# Créer le query_engine: 
+# Créer le query_engine (utilisé pour les questions "explicatives" / synthèse en langage naturel)
 query_engine = index.as_query_engine(similarity_top_k=5)
+
+# --- Détection "l'utilisateur veut le code brut, pas un résumé" ---
+# Le query_engine ci-dessus fait toujours passer les chunks récupérés par le LLM,
+# qui reformule/synthétise -> c'est ce qui "avale" le contenu exact (ex: salma_test
+# absent d'un résumé, alors qu'il est bien dans les chunks récupérés).
+# Pour répondre "donne-moi le code", on doit contourner la synthèse LLM et renvoyer
+# directement le texte brut des noeuds récupérés par le retriever.
+RAW_CODE_REQUEST_PATTERN = re.compile(
+    r"(contenu\s+(complet|exact)|code\s+(source|brut|exact)|"
+    r"fichier\s+(complet|entier)|ligne\s+par\s+ligne|donne[\s-]*moi\s+le\s+code|"
+    r"texte\s+brut|verbatim|raw\s+content)",
+    re.IGNORECASE,
+)
+
+# Nombre de chunks à renvoyer bruts quand on détecte une demande de code exact.
+# Un peu plus élevé que similarity_top_k du query_engine (5) car ici on ne filtre
+# plus par pertinence "sémantique agrégée" : on veut couvrir le fichier visé.
+RAW_CODE_TOP_K = 8
+
+
+def _extraire_chemin_fichier(question: str) -> str | None:
+    """Essaie d'extraire un chemin/nom de fichier explicite de la question
+    (ex: 'Admin.cpp', 'src/view/MenuAdmin.java') pour filtrer les noeuds bruts
+    sur ce fichier précis plutôt que de tout renvoyer."""
+    match = re.search(r"[\w./+-]+\.(cpp|h|hpp|java|py|php|js|ts|sql)\b", question, re.IGNORECASE)
+    return match.group(0) if match else None
+
 
 @mcp.tool()
 async def search_code(question: str) -> str:
-    """Recherche dans le code source indexé et répond à une question sur le projet."""
-    response = await query_engine.aquery(question)
+    """Recherche dans le code indexé. Retrouve les extraits les plus pertinents
+    par similarité sémantique, récupère aussi les chunks voisins (même fichier)
+    pour éviter de couper une fonction, puis demande au LLM de restituer le code
+    exact trouvé (jamais un résumé/paraphrase) et de répondre clairement si la
+    fonction demandée n'existe pas dans les extraits."""
+
+    retriever = index.as_retriever(similarity_top_k=6)
+    nodes = await retriever.aretrieve(question)
+
+    if not nodes:
+        return "Aucun résultat trouvé dans l'index pour cette question."
+
+    fichiers_vus = set()
+    blocs = []
+
+    for node in nodes:
+        meta = node.node.metadata or {}
+        file_path = meta.get("file_path")
+        node_id = node.node.node_id or ""
+
+        if not file_path or file_path in fichiers_vus:
+            continue
+        fichiers_vus.add(file_path)
+
+        # Récupère aussi le chunk précédent et suivant du même fichier,
+        # pour éviter de couper une fonction en plein milieu
+        chunk_index = None
+        if "::" in node_id:
+            try:
+                chunk_index = int(node_id.split("::")[-1])
+            except ValueError:
+                pass
+
+        textes = [node.node.get_content()]
+        if chunk_index is not None:
+            for voisin_idx in (chunk_index - 1, chunk_index + 1):
+                voisin = chroma_collection.get(ids=[f"{file_path}::{voisin_idx}"], include=["documents"])
+                if voisin["documents"]:
+                    if voisin_idx < chunk_index:
+                        textes.insert(0, voisin["documents"][0])
+                    else:
+                        textes.append(voisin["documents"][0])
+
+        blocs.append(f"--- {file_path} ---\n" + "\n".join(textes))
+
+    contexte = "\n\n".join(blocs)
+
+    prompt = (
+        "Tu es un assistant pour développeurs qui recherche du code existant dans un dépôt.\n"
+        "Voici des extraits de code trouvés dans l'index :\n\n"
+        f"{contexte}\n\n"
+        f"Question du développeur : {question}\n\n"
+        "Règles strictes :\n"
+        "1. Si un extrait contient la fonction/le code demandé, recopie-le EXACTEMENT "
+        "tel qu'il apparaît ci-dessus (verbatim, jamais paraphrasé ni résumé), précédé "
+        "du chemin du fichier.\n"
+        "2. Si la question demande simplement si une fonction existe (ex: 'est-ce que "
+        "X existe déjà'), réponds clairement OUI ou NON, avec le fichier concerné si "
+        "trouvé.\n"
+        "3. Si aucun extrait fourni ne correspond à la question, dis-le explicitement "
+        "('Je ne trouve pas cette fonction dans le code indexé') plutôt que d'inventer "
+        "ou de deviner.\n"
+        "4. Ne donne jamais un résumé en prose du fonctionnement du code à la place du "
+        "code lui-même — le développeur veut voir le code réel."
+    )
+
+    response = await Settings.llm.acomplete(prompt)
     return str(response)
 
 with open(os.path.join(BASE_DIR, "prompts", "check_pr_health.md"), encoding="utf-8") as file:
