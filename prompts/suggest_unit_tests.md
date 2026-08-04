@@ -1,1 +1,0 @@
-Analyse le fichier {file_path} en utilisant l'outil search_code, puis propose des cas de tests unitaires pertinents. Base-toi strictement sur les critères définis dans la resource elyora://prompts/unit-test-criteria avant de répondre.

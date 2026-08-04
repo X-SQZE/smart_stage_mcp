@@ -1,5 +1,5 @@
 from llama_index.core import StorageContext, load_index_from_storage, Settings
-import config
+import configu
 import sys
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.google_genai import GoogleGenAI

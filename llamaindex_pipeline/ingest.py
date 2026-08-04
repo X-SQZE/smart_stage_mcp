@@ -1,26 +1,28 @@
 from llama_index.readers.github import GithubRepositoryReader, GithubClient
 from llama_index.core.node_parser import CodeSplitter, SentenceSplitter
-from llama_index.core import VectorStoreIndex, Settings
-import config
-import os
+from llama_index.core import VectorStoreIndex, Settings, StorageContext
+from llama_index.vector_stores.chroma import ChromaVectorStore
 from llama_index.llms.google_genai import GoogleGenAI
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+import chromadb
+import os
+import configu
 
-os.environ["GOOGLE_API_KEY"] = config.GEMINI_API_KEY
-Settings.embed_model = HuggingFaceEmbedding(model_name=config.EMBED_MODEL_NAME)
-Settings.llm = GoogleGenAI(model=config.LLM_MODEL_NAME, api_key=config.GEMINI_API_KEY)
+os.environ["GOOGLE_API_KEY"] = configu.GEMINI_API_KEY
+Settings.embed_model = HuggingFaceEmbedding(model_name=configu.EMBED_MODEL_NAME)
+Settings.llm = GoogleGenAI(model=configu.LLM_MODEL_NAME, api_key=configu.GEMINI_API_KEY)
 
-github_client = GithubClient(github_token=config.GITHUB_TOKEN)
+github_client = GithubClient(github_token=configu.GITHUB_TOKEN)
 
 reader = GithubRepositoryReader(
     github_client=github_client,
-    owner=config.REPO_OWNER,
-    repo=config.REPO_NAME,
-    filter_file_extensions=(config.REQUIRED_EXTS, GithubRepositoryReader.FilterType.INCLUDE),
-    filter_directories=(config.EXCLUDE_DIRS, GithubRepositoryReader.FilterType.EXCLUDE),
+    owner=configu.REPO_OWNER,
+    repo=configu.REPO_NAME,
+    filter_file_extensions=(configu.REQUIRED_EXTS, GithubRepositoryReader.FilterType.INCLUDE),
+    filter_directories=(configu.EXCLUDE_DIRS, GithubRepositoryReader.FilterType.EXCLUDE),
 )
 
-documents = reader.load_data(branch=config.BRANCH)
+documents = reader.load_data(branch=configu.BRANCH)
 print(f"{len(documents)} fichiers récupérés")
 
 EXT_TO_LANG = {
@@ -28,6 +30,12 @@ EXT_TO_LANG = {
     ".js": "javascript",
     ".ts": "typescript",
     ".java": "java",
+    ".cpp": "cpp",        # C++
+    ".c": "c",            # C
+    ".go": "go",          # Go
+    ".rs": "rust",        # Rust
+    ".php": "php",        # PHP
+    ".rb": "ruby",        # Ruby
 }
 TEXT_EXTS = [".md", ".txt"]
 
@@ -54,15 +62,35 @@ if text_docs:
 
 print(f"{len(all_nodes)} chunks créés au total")
 
-import time
-index = VectorStoreIndex(all_nodes)
 
-index.storage_context.persist(persist_dir=config.STORAGE_DIR)
-print("Index sauvegardé dans", config.STORAGE_DIR)
+# Assigner des IDs cohérents avec incremental_update.py : "chemin::index_dans_le_fichier"
+nodes_by_file: dict[str, list] = {}
+for node in all_nodes:
+    file_path = node.metadata.get("file_path", "unknown")
+    nodes_by_file.setdefault(file_path, []).append(node)
 
+for file_path, nodes in nodes_by_file.items():
+    for i, node in enumerate(nodes):
+        node.node_id = f"{file_path}::{i}"
 
+# Écriture dans ChromaDB (cohérent avec incremental_update.py et mon_serveur.py)
+chroma_client = chromadb.PersistentClient(path=configu.STORAGE_DIR)
+chroma_collection = chroma_client.get_or_create_collection(configu.CHROMA_COLLECTION_NAME)
+vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
+storage_context = StorageContext.from_defaults(vector_store=vector_store)
 
-#--------------------------------
-for i, node in enumerate(response.source_nodes):
-    content = node.node.get_content()
-    print(f"Chunk {i+1}: {len(content.splitlines())} lignes")
+chroma_client = chromadb.PersistentClient(path=configu.STORAGE_DIR)
+
+# Supprime l'ancienne collection si elle existe, pour repartir propre
+try:
+    chroma_client.delete_collection(configu.CHROMA_COLLECTION_NAME)
+    print(f"Ancienne collection '{configu.CHROMA_COLLECTION_NAME}' supprimée.")
+except Exception:
+    print("Aucune collection existante à supprimer (premier run).")
+
+chroma_collection = chroma_client.get_or_create_collection(configu.CHROMA_COLLECTION_NAME)
+vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
+storage_context = StorageContext.from_defaults(vector_store=vector_store)
+
+index = VectorStoreIndex(all_nodes, storage_context=storage_context)
+print("Index sauvegardé dans ChromaDB :", configu.STORAGE_DIR)

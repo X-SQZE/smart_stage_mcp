@@ -25,7 +25,10 @@ import chromadb
 
 Settings.embed_model = HuggingFaceEmbedding(model_name=configu.EMBED_MODEL_NAME)
 
-EXT_TO_LANG = {".py": "python", ".js": "javascript", ".ts": "typescript", ".java": "java"}
+EXT_TO_LANG = {
+    ".py": "python", ".js": "javascript", ".ts": "typescript", ".java": "java",
+    ".cpp": "cpp", ".c": "c", ".go": "go", ".rs": "rust", ".php": "php", ".rb": "ruby",
+}
 TEXT_EXTS = [".md", ".txt"]
 
 
