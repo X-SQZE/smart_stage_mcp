@@ -21,7 +21,7 @@ CHECK_INTERVAL_SECONDS = 30  # fréquence de vérification
 
 # Dossier séparé où on garde un clone de la branche chroma-index
 SYNC_REPO_DIR = os.path.join(
-    os.path.dirname(configu.BASE_DIR), "..", "PFA_chroma"
+    os.path.dirname(configu.BASE_DIR), "..", "chroma_sync_repo_pfa"
 )
 SYNC_REPO_DIR = os.path.abspath(SYNC_REPO_DIR)
 
