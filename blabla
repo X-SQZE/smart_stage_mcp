@@ -1,0 +1,150 @@
+@mcp.tool()
+async def propose_code_for_feature(
+    description_fonctionnalite: str,
+    fichier_cible: str = ""
+) -> str:
+    """Propose une implémentation de code, en respectant l'architecture et
+    le cahier des charges définis dans le README.md du projet."""
+
+    # 1. Vérification de redondance via le RAG (inchangé)
+    retriever = index.as_retriever(similarity_top_k=8)
+    nodes = await retriever.aretrieve(description_fonctionnalite)
+    extraits_existants = []
+    fichiers_vus = set()
+    for node in nodes:
+        meta = node.node.metadata or {}
+        file_path = meta.get("file_path")
+        if not file_path or file_path in fichiers_vus:
+            continue
+        fichiers_vus.add(file_path)
+        extraits_existants.append(f"--- {file_path} ---\n{node.node.get_content()}")
+    contexte_existant = "\n\n".join(extraits_existants) if extraits_existants else "Aucun code similaire trouvé."
+
+    # 2. Extraction des sections pertinentes DEPUIS le README existant
+    readme = fetch_github_doc("README.md")
+    architecture = _extract_markdown_section(readme, "Architecture Technique") or ""
+    stack = _extract_markdown_section(readme, "Stack Technologique") or ""
+    modele_donnees = _extract_markdown_section(readme, "Modèle de Données") or ""
+    structure_projet = _extract_markdown_section(readme, "Structure du Projet") or ""
+    modules = _extract_markdown_section(readme, "Modules Fonctionnels") or ""
+    securite = _extract_markdown_section(readme, "Sécurité & Authentification") or ""
+
+    # 3. Contenu du fichier cible, si précisé
+    contenu_fichier_cible = fetch_github_doc(fichier_cible) if fichier_cible else ""
+
+    # 4. Génération encadrée
+    prompt = (
+        "Tu es un assistant qui aide à écrire du code pour un projet existant, "
+        "en respectant STRICTEMENT ses règles définies dans son README.\n\n"
+        f"## Architecture Technique\n{architecture}\n\n"
+        f"## Stack Technologique\n{stack}\n\n"
+        f"## Modèle de Données\n{modele_donnees}\n\n"
+        f"## Structure du Projet\n{structure_projet}\n\n"
+        f"## Modules Fonctionnels attendus\n{modules}\n\n"
+        f"## Sécurité & Authentification\n{securite}\n\n"
+        f"## Code déjà existant, potentiellement similaire\n{contexte_existant}\n\n"
+        + (f"## Contenu actuel du fichier cible ({fichier_cible})\n{contenu_fichier_cible}\n\n" if fichier_cible else "")
+        + f"## Fonctionnalité demandée\n{description_fonctionnalite}\n\n"
+        "Instructions strictes :\n"
+        "Instructions strictes :\n"
+        "1. Si le code existant ci-dessus implémente DÉJÀ cette fonctionnalité, "
+        "NE PROPOSE PAS de nouveau code — dis clairement où elle existe déjà.\n"
+        "2. VÉRIFIE QUE LA FONCTIONNALITÉ DEMANDÉE EST BIEN PRÉVUE dans les Rôles "
+        "Utilisateurs et Modules Fonctionnels ci-dessus. Si elle N'EST PAS mentionnée "
+        "ou sort du périmètre défini (ex: un rôle non listé, une fonctionnalité non "
+        "prévue), REFUSE explicitement de proposer du code et explique pourquoi "
+        "cette demande ne correspond pas au cahier des charges actuel du projet. "
+        "Ne propose JAMAIS de code hors périmètre, même si c'est techniquement "
+        "faisable.\n"
+        "3. Génère le code UNIQUEMENT si la fonctionnalité est bien dans le périmètre "
+        "et n'existe pas déjà.\n"
+    )
+
+    response = await Settings.llm.acomplete(prompt)
+    return str(response)
+
+
+@mcp.tool()
+def create_pull_request_with_code(
+    nom_branche: str,
+    chemin_fichier: str,
+    contenu_fichier: str,
+    titre_pr: str,
+    description_pr: str,
+    base_branch: str = "main"
+) -> dict[str, Any]:
+    """Crée une nouvelle branche à partir de main, y ajoute/modifie un fichier,
+    puis ouvre une Pull Request vers main pour révision humaine.
+
+    NE MODIFIE JAMAIS main directement — le code proposé doit TOUJOURS passer
+    par une PR, jamais un commit/push direct sur la branche principale.
+
+    nom_branche : nom de la nouvelle branche (ex: 'feature/expert-technique-role')
+    chemin_fichier : chemin du fichier à créer/modifier
+    contenu_fichier : contenu complet du fichier
+    titre_pr : titre de la Pull Request
+    description_pr : description expliquant ce que fait ce changement
+    base_branch : branche de base, toujours 'main' par défaut, ne JAMAIS changer
+                  sauf demande explicite et justifiée
+    """
+    token = os.getenv("GITHUB_TOKEN_AGENT")
+    headers = {"Accept": "application/vnd.github+json", "Authorization": f"Bearer {token}"}
+
+    # 1. Récupère le SHA du dernier commit sur main
+    ref_data = _get_json(f"{API_URL}/git/refs/heads/{base_branch}")
+    if isinstance(ref_data, dict) and "error" in ref_data:
+        return ref_data
+    base_sha = ref_data["object"]["sha"]
+
+    # 2. Crée la nouvelle branche à partir de ce commit
+    branch_resp = requests.post(
+        f"{API_URL}/git/refs",
+        headers=headers,
+        json={"ref": f"refs/heads/{nom_branche}", "sha": base_sha},
+    )
+    if not branch_resp.ok:
+        return {"error": "branch_creation_failed", "detail": branch_resp.json()}
+
+    # 3. Vérifie si le fichier existe déjà (pour update) ou pas (pour create)
+    existing = _get_json(f"{API_URL}/contents/{chemin_fichier}", params={"ref": nom_branche})
+    sha_existant = existing.get("sha") if isinstance(existing, dict) and "sha" in existing else None
+
+    # 4. Crée/modifie le fichier sur cette nouvelle branche
+    content_b64 = base64.b64encode(contenu_fichier.encode("utf-8")).decode("utf-8")
+    file_payload = {
+        "message": f"Add/update {chemin_fichier} via agent MCP",
+        "content": content_b64,
+        "branch": nom_branche,
+    }
+    if sha_existant:
+        file_payload["sha"] = sha_existant
+
+    file_resp = requests.put(
+        f"{API_URL}/contents/{chemin_fichier}",
+        headers=headers,
+        json=file_payload,
+    )
+    if not file_resp.ok:
+        return {"error": "file_creation_failed", "detail": file_resp.json()}
+
+    # 5. Ouvre la Pull Request
+    pr_resp = requests.post(
+        f"{API_URL}/pulls",
+        headers=headers,
+        json={
+            "title": titre_pr,
+            "body": description_pr + "\n\n⚠️ Cette PR a été générée automatiquement par l'agent MCP. Révision humaine requise avant merge.",
+            "head": nom_branche,
+            "base": base_branch,
+        },
+    )
+    if not pr_resp.ok:
+        return {"error": "pr_creation_failed", "detail": pr_resp.json()}
+
+    pr_data = pr_resp.json()
+    return {
+        "status": "success",
+        "pr_url": pr_data.get("html_url"),
+        "pr_number": pr_data.get("number"),
+        "message": "Pull Request créée avec succès. Une révision humaine est nécessaire avant merge sur main.",
+    }
