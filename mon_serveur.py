@@ -246,6 +246,21 @@ index = VectorStoreIndex.from_vector_store(vector_store)
 
 # Créer le query_engine (utilisé pour les questions "explicatives" / synthèse en langage naturel)
 query_engine = index.as_query_engine(similarity_top_k=5)
+_code_retriever = index.as_retriever(similarity_top_k=5)
+
+
+def _rag_retriever(question: str) -> list[dict[str, Any]]:
+    """Adapte le retriever LlamaIndex au format attendu par context_builder.py."""
+    nodes = _code_retriever.retrieve(question)
+    return [
+        {
+            "text": node.get_content(),
+            "source": node.node.metadata.get("file_path", "code_chunk"),
+            "score": node.score or 0.0,
+        }
+        for node in nodes
+    ]
+
 
 # --- Détection "l'utilisateur veut le code brut, pas un résumé" ---
 # Le query_engine ci-dessus fait toujours passer les chunks récupérés par le LLM,
@@ -278,6 +293,7 @@ def _extraire_chemin_fichier(question: str) -> str | None:
 
 @mcp.tool()
 async def search_code(question: str) -> str:
+<<<<<<< HEAD
     """Recherche dans le code indexé. Retrouve les extraits les plus pertinents
     par similarité sémantique, récupère aussi les chunks voisins (même fichier)
     pour éviter de couper une fonction, puis demande au LLM de restituer le code
@@ -375,6 +391,63 @@ async def search_code(question: str) -> str:
 
     response = await Settings.llm.acomplete(prompt)
     return str(response)
+=======
+    """Recherche dans le code source indexé et répond à une question sur le projet.
+
+    Passe par la couche d'optimisation (optimization/) avant d'appeler le
+    LLM : context_builder -> context_optimizer -> LLM -> token_monitor.
+    """
+    import time as _time
+
+    from optimization import build_context, estimate_tokens, optimize, token_monitor
+
+    start = _time.perf_counter()
+    request_id = token_monitor.new_request_id()
+
+    raw_context = build_context(
+        task=question,
+        mcp_tool="search_code",
+        retriever_fn=_rag_retriever,
+    )
+    optimized = optimize(raw_context, token_budget=3000)
+
+    prompt = (
+        "Tu es un assistant qui répond à des questions sur le code source du "
+        "projet SmartStage à partir du contexte fourni ci-dessous.\n\n"
+        f"Contexte:\n{optimized.text}\n\nQuestion: {question}\nRéponse:"
+    )
+
+    status = "success"
+    try:
+        response = await Settings.llm.acomplete(prompt)
+        answer = str(response)
+    except Exception as exc:
+        logger.exception("Échec de l'appel LLM dans search_code")
+        answer = f"Erreur lors de l'appel au LLM: {exc}"
+        status = "error"
+
+    response_time_ms = (_time.perf_counter() - start) * 1000
+    token_monitor.record_request(
+        request_id=request_id,
+        conversation_id="default",
+        mcp_tool="search_code",
+        user_task=question,
+        prompt_tokens=optimized.final_tokens,
+        completion_tokens=estimate_tokens(answer),
+        model=configu.LLM_MODEL_NAME,
+        response_time_ms=response_time_ms,
+        status=status,
+        context_breakdown={
+            "rag_chunks": sum(1 for c in raw_context.chunks if c.kind == "rag"),
+            "resource_chunks": sum(1 for c in raw_context.chunks if c.kind == "resource"),
+            "memory_chunks": sum(1 for c in raw_context.chunks if c.kind == "memory"),
+            "sources": [[c.source, c.kind] for c in raw_context.chunks],
+        },
+    )
+    token_monitor.record_optimization(request_id, optimized)
+
+    return answer
+>>>>>>> 9d7bdc5e752d9fae94a34351da59225004fd8428
 
 @mcp.tool()
 def list_repository_tree(ref: str = "main", path_prefix: str = "") -> list[dict[str, Any]] | dict[str, Any]:
@@ -536,6 +609,14 @@ def open_pull_request(
 
 
 
+
+# Enregistre les 3 outils MCP de la couche d'optimisation
+# (token_usage_report, explain_token_usage, optimize_context) sur cette
+# même instance `mcp`. Importé en dernier pour que mcp/index/Settings
+# soient déjà initialisés. Ne crée pas de nouveau serveur.
+import optimization_tools  # noqa: E402,F401
+import planner_tools
+import style_tools
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")
