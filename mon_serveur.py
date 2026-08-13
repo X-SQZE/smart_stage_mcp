@@ -618,7 +618,7 @@ async def generate_implementation_plan(user_request: str, project_context: str) 
             "questions": [
                 "Je n'ai pas réussi à générer un plan structuré valide. "
                 "Peux-tu reformuler ta demande de façon plus précise ?"
-            ],
+            ],#comment
             "branch_name": "", "commit_message": "", "pr_title": "",
             "pr_description": "", "files": [],
         })
@@ -666,4 +666,4 @@ import optimization_tools  # noqa: E402,F401
 
 
 if __name__ == "__main__":
-    mcp.run(transport="stdio")
+    mcp.run(transport="stdio")#comment 
