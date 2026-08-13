@@ -1,6 +1,10 @@
 """Serveur MCP SmartStage pour Claude Desktop (transport stdio)."""
 
 from __future__ import annotations
+import sys
+import logging
+
+logging.basicConfig(stream=sys.stderr, level=logging.WARNING)
 
 import base64
 import os
@@ -8,6 +12,7 @@ import re
 import time
 from datetime import datetime, timedelta
 from typing import Any
+import json
 import sys
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.google_genai import GoogleGenAI
@@ -25,6 +30,7 @@ REPO = os.getenv("REPO_NAME")
 API_URL = f"https://api.github.com/repos/{OWNER}/{REPO}"
 TIMEOUT_SECONDS = 20
 RESOURCE_CACHE: dict[str, str] = {}
+
 from tools.github_tools import (
     active_repo_full_name,
     check_merge_conflicts as github_check_merge_conflicts,
@@ -293,7 +299,6 @@ def _extraire_chemin_fichier(question: str) -> str | None:
 
 @mcp.tool()
 async def search_code(question: str) -> str:
-<<<<<<< HEAD
     """Recherche dans le code indexé. Retrouve les extraits les plus pertinents
     par similarité sémantique, récupère aussi les chunks voisins (même fichier)
     pour éviter de couper une fonction, puis demande au LLM de restituer le code
@@ -391,63 +396,6 @@ async def search_code(question: str) -> str:
 
     response = await Settings.llm.acomplete(prompt)
     return str(response)
-=======
-    """Recherche dans le code source indexé et répond à une question sur le projet.
-
-    Passe par la couche d'optimisation (optimization/) avant d'appeler le
-    LLM : context_builder -> context_optimizer -> LLM -> token_monitor.
-    """
-    import time as _time
-
-    from optimization import build_context, estimate_tokens, optimize, token_monitor
-
-    start = _time.perf_counter()
-    request_id = token_monitor.new_request_id()
-
-    raw_context = build_context(
-        task=question,
-        mcp_tool="search_code",
-        retriever_fn=_rag_retriever,
-    )
-    optimized = optimize(raw_context, token_budget=3000)
-
-    prompt = (
-        "Tu es un assistant qui répond à des questions sur le code source du "
-        "projet SmartStage à partir du contexte fourni ci-dessous.\n\n"
-        f"Contexte:\n{optimized.text}\n\nQuestion: {question}\nRéponse:"
-    )
-
-    status = "success"
-    try:
-        response = await Settings.llm.acomplete(prompt)
-        answer = str(response)
-    except Exception as exc:
-        logger.exception("Échec de l'appel LLM dans search_code")
-        answer = f"Erreur lors de l'appel au LLM: {exc}"
-        status = "error"
-
-    response_time_ms = (_time.perf_counter() - start) * 1000
-    token_monitor.record_request(
-        request_id=request_id,
-        conversation_id="default",
-        mcp_tool="search_code",
-        user_task=question,
-        prompt_tokens=optimized.final_tokens,
-        completion_tokens=estimate_tokens(answer),
-        model=configu.LLM_MODEL_NAME,
-        response_time_ms=response_time_ms,
-        status=status,
-        context_breakdown={
-            "rag_chunks": sum(1 for c in raw_context.chunks if c.kind == "rag"),
-            "resource_chunks": sum(1 for c in raw_context.chunks if c.kind == "resource"),
-            "memory_chunks": sum(1 for c in raw_context.chunks if c.kind == "memory"),
-            "sources": [[c.source, c.kind] for c in raw_context.chunks],
-        },
-    )
-    token_monitor.record_optimization(request_id, optimized)
-
-    return answer
->>>>>>> 9d7bdc5e752d9fae94a34351da59225004fd8428
 
 @mcp.tool()
 def list_repository_tree(ref: str = "main", path_prefix: str = "") -> list[dict[str, Any]] | dict[str, Any]:
@@ -605,7 +553,107 @@ def open_pull_request(
         "pr_url": data.get("html_url"),
         "pr_number": data.get("number"),
     }
+@mcp.tool()
+async def generate_implementation_plan(user_request: str, project_context: str) -> str:
+    """Analyse la demande utilisateur face au contexte du projet et décide s'il
+    peut l'implémenter directement, ou s'il doit d'abord clarifier certains
+    points avec l'utilisateur. Se comporte comme un architecte logiciel senior :
+    il identifie lui-même les zones d'incertitude (pas de liste prédéfinie),
+    qu'il s'agisse du langage, du style architectural, des conventions de code,
+    de la structure de dossiers, ou de tout autre choix structurant."""
+    prompt = (
+        "Tu es un architecte logiciel senior qui rejoint un projet existant "
+        "(ou en démarre un nouveau si le contexte est vide). Avant d'écrire du "
+        "code, tu dois évaluer, comme le ferait un humain expérimenté, si tu as "
+        "assez d'éléments pour produire un travail cohérent avec les habitudes "
+        "de CE projet précis.\n\n"
+        f"Contexte disponible (documentation, code existant, conventions déjà "
+        f"établies — peut être vide si le projet est neuf) :\n"
+        f"{project_context or '(aucun contexte disponible)'}\n\n"
+        f"Demande : {user_request}\n\n"
+        "Ta démarche :\n"
+        "1. Identifie TOI-MÊME, au cas par cas, quelles décisions structurantes "
+        "sont nécessaires pour cette demande précise. Cela peut concerner "
+        "(liste non exhaustive, n'en écarte ni n'en ajoute aucune par défaut) : "
+        "le langage/framework, le style architectural (MVC, hexagonal, "
+        "microservices, monolithe, feature-based, layered...), les conventions "
+        "de nommage et de style de code, l'organisation des dossiers, les "
+        "patterns de gestion d'erreurs, les choix de tests, ou toute autre "
+        "convention spécifique à ce projet.\n"
+        "2. Si le contexte fourni répond DÉJÀ clairement à ces questions "
+        "(explicitement ou par déduction forte du code/doc existant), "
+        "n'en repose AUCUNE — utilise directement ces conventions.\n"
+        "3. Ne pose des questions QUE sur les points réellement ambigus ou "
+        "manquants pour CETTE demande précise. Ne pose jamais une question "
+        "générique 'quel framework veux-tu' si le contexte le montre déjà, et "
+        "ne pose jamais de questions hors sujet par rapport à la demande.\n"
+        "4. Si tu as suffisamment d'éléments (contexte existant OU demande "
+        "elle-même suffisamment précise), procède directement à la génération.\n\n"
+        "Réponds UNIQUEMENT avec un JSON valide, sans aucun texte autour :\n"
+        "{\n"
+        '  "scope_ok": true ou false,\n'
+        '  "questions": ["question 1", "question 2"],\n'
+        '  "branch_name": "...",\n'
+        '  "commit_message": "...",\n'
+        '  "pr_title": "...",\n'
+        '  "pr_description": "...",\n'
+        '  "files": [{"path": "...", "content": "..."}]\n'
+        "}"
+    )
 
+    response = await Settings.llm.acomplete(prompt)
+    text = str(response).strip()
+
+    if text.startswith("```"):
+        text = text.strip("`")
+        text = text.split("\n", 1)[1] if "\n" in text else text
+        if text.lower().startswith("json"):
+            text = text.split("\n", 1)[1] if "\n" in text else ""
+
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return json.dumps({
+            "scope_ok": False,
+            "questions": [
+                "Je n'ai pas réussi à générer un plan structuré valide. "
+                "Peux-tu reformuler ta demande de façon plus précise ?"
+            ],
+            "branch_name": "", "commit_message": "", "pr_title": "",
+            "pr_description": "", "files": [],
+        })
+
+    return json.dumps(parsed)
+
+
+@mcp.tool()
+def save_project_conventions(new_conventions: str, branch: str = "main") -> dict[str, Any]:
+    """Ajoute ou met à jour des conventions de projet (architecture, style de
+    code, structure) dans CONVENTIONS.md à la racine du repo, pour que les
+    futures demandes n'aient plus besoin de reposer ces questions. Fusionne
+    avec le contenu existant plutôt que de l'écraser."""
+    existing = fetch_github_doc("CONVENTIONS.md")
+    if existing.startswith("# Erreur"):
+        existing = "# Conventions du projet\n\n"
+
+    updated_content = existing.rstrip() + "\n\n" + new_conventions.strip() + "\n"
+
+    token = os.getenv("GITHUB_TOKEN_AGENT")
+    headers = {"Accept": "application/vnd.github+json", "Authorization": f"Bearer {token}"}
+    existing_file = requests.get(f"{API_URL}/contents/CONVENTIONS.md", headers=headers, params={"ref": branch})
+    sha_existing = existing_file.json().get("sha") if existing_file.ok else None
+
+    content_b64 = base64.b64encode(updated_content.encode("utf-8")).decode("utf-8")
+    payload = {"message": "Mise à jour des conventions du projet", "content": content_b64, "branch": branch}
+    if sha_existing:
+        payload["sha"] = sha_existing
+
+    resp = requests.put(f"{API_URL}/contents/CONVENTIONS.md", headers=headers, json=payload)
+    if not resp.ok:
+        return {"error": "conventions_update_failed", "detail": resp.json()}
+
+    RESOURCE_CACHE.pop("CONVENTIONS.md", None)
+    return {"status": "success", "note": "CONVENTIONS.md mis à jour."}
 
 
 
