@@ -663,8 +663,7 @@ def save_project_conventions(new_conventions: str, branch: str = "main") -> dict
 # même instance `mcp`. Importé en dernier pour que mcp/index/Settings
 # soient déjà initialisés. Ne crée pas de nouveau serveur.
 import optimization_tools  # noqa: E402,F401
-import planner_tools
-import style_tools
+
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")
