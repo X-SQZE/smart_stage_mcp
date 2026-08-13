@@ -9,26 +9,20 @@ async def main():
     if len(sys.argv) > 1:
         user_request = " ".join(sys.argv[1:])
     else:
-        user_request = input("Que veux-tu que l'agent fasse ? ")
+        print("Erreur: Veuillez fournir une requête utilisateur en argument.")
+        print('Exemple: python -m agent.nodes.run "Ajouter une fonctionnalité X"')
+        sys.exit(1)
 
     result = await app.ainvoke({"user_request": user_request})
 
-    if not result.get("scope_ok", False):
-        print("\n--- L'agent a besoin de précisions ---")
+    if not result.get("scope_ok", True) and result.get("clarifying_questions"):
+        print("\n--- L'agent manque d'informations pour procéder de façon autonome ---")
         for q in result.get("clarifying_questions", []):
             print(f"- {q}")
-
-        reponse_utilisateur = input(
-            "\nRéponds à ces questions (ta réponse sera mémorisée pour la suite) : "
-        )
-
-        tools = await get_mcp_tools()
-        await tools["save_project_conventions"].ainvoke({"new_conventions": reponse_utilisateur})
-
-        print("\nConventions enregistrées. Relance ta demande, elle ne redemandera plus ces infos.")
+        print("\nVeuillez relancer la commande avec plus de précisions ou mettre à jour le repository avec plus de contexte.")
     else:
-        print("\n--- Pull Request créée ---")
-        print(result.get("pull_request_url"))
+        print("\n--- Pull Request créée avec succès ---")
+        print(result.get("pull_request_url", "Aucune PR créée."))
 
 
 if __name__ == "__main__":

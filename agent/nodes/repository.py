@@ -5,7 +5,7 @@ from agent.state import AgentState
 async def repository_node(state: AgentState) -> dict:
     print("--- 1. L'agent analyse le dépôt et récupère le contexte via le RAG MCP ---")
 
-    user_prompt = state["user_request"]
+    user_prompt = state.get("user_request", "")
     tools = await get_mcp_tools()
 
     structure = await tools["explore_repo_structure"].ainvoke({"ref": "main"})

@@ -1,21 +1,27 @@
-from typing import List, TypedDict
+from typing import TypedDict
 
 
-class FileToWrite(TypedDict):
-    path: str
-    content: str
-
-
-class AgentState(TypedDict):
+class AgentState(TypedDict, total=False):
+    # Entrée utilisateur
     user_request: str
+
+    # Repository / RAG
     repository_context: str
-    relevant_files: List[str]
+    relevant_files: list[str]
+
+    # Analyse / planification
     architectural_plan: str
+
+    # Validation
     scope_ok: bool
-    clarifying_questions: List[str]
+    clarifying_questions: list[str]
+
+    # Git / implémentation
     branch_name: str
     commit_message: str
+    files_to_write: list[dict]
+
+    # Pull Request
     pr_title: str
     pr_description: str
-    files_to_write: List[FileToWrite]
     pull_request_url: str

@@ -1,31 +1,44 @@
-from agent.nodes.mcp import mcp_node
-from agent.nodes.planning import planning_node
-from agent.nodes.repository import repository_node
-from agent.nodes.scope_check import scope_check_node
-from agent.state import AgentState
 from langgraph.graph import END, StateGraph
+
+from agent.state import AgentState
+
+from agent.nodes.repository import repository_node
+from agent.nodes.planning import planning_node
+from agent.nodes.scope_check import scope_check_node
+from agent.nodes.mcp import mcp_node
+
 
 workflow = StateGraph(AgentState)
 
-workflow.add_node("repository_step", repository_node)
-workflow.add_node("planning_step", planning_node)
-workflow.add_node("scope_check_step", scope_check_node)
-workflow.add_node("mcp_step", mcp_node)
+workflow.add_node("repository", repository_node)
+workflow.add_node("planning", planning_node)
+workflow.add_node("scope_check", scope_check_node)
+workflow.add_node("mcp", mcp_node)
 
-workflow.set_entry_point("repository_step")
-workflow.add_edge("repository_step", "planning_step")
-workflow.add_edge("planning_step", "scope_check_step")
+
+workflow.set_entry_point("repository")
+
+workflow.add_edge("repository", "planning")
+workflow.add_edge("planning", "scope_check")
 
 
 def route_after_scope_check(state: AgentState) -> str:
-    return "mcp_step" if state.get("scope_ok") else END
+    # Si le scope n'est pas OK et qu'on a des questions, on s'arrête.
+    if not state.get("scope_ok", True) and state.get("clarifying_questions"):
+        return END
+
+    return "mcp"
 
 
 workflow.add_conditional_edges(
-    "scope_check_step",
+    "scope_check",
     route_after_scope_check,
-    {"mcp_step": "mcp_step", END: END},
+    {
+        "mcp": "mcp",
+        END: END,
+    },
 )
-workflow.add_edge("mcp_step", END)
+
+workflow.add_edge("mcp", END)
 
 app = workflow.compile()
