@@ -2,8 +2,7 @@
 auto_sync_index.py — Synchronise automatiquement la base Chroma locale
 avec la branche 'chroma-index' du repo distant, à intervalle régulier.
 
-Lance ce script en arrière-plan (ou dans un terminal dédié) pendant que
-tu travailles — il vérifie toutes les X secondes s'il y a du nouveau.
+
 
 Usage: python auto_sync_index.py
 """

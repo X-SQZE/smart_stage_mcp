@@ -9,8 +9,8 @@ from typing import Any
 import requests
 
 
-DEFAULT_OWNER = os.getenv("GITHUB_OWNER")
-DEFAULT_REPO = os.getenv("GITHUB_REPO")
+DEFAULT_OWNER = os.getenv("REPO_OWNER")
+DEFAULT_REPO = os.getenv("REPO_NAME")
 TIMEOUT_SECONDS = 20
 STATE_FILE = Path(__file__).resolve().parent.parent / ".active_repository"
 
@@ -61,24 +61,18 @@ def list_commits(pr_number: int | None = None, branch: str | None = None, limit:
     - Sinon, si branch est fourni : liste les commits de cette branche.
     - Sinon : liste les commits de la branche par défaut du repo actif.
     """
-    repo = get_active_repo()  # ta fonction existante qui retourne le repo GitHub actif
-    headers = {
-        "Authorization": f"Bearer {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github+json",
-    }
-
     if pr_number is not None:
-        url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/commits"
-        params = {}
+        url = f"{repo_api_url()}/pulls/{pr_number}/commits"
+        params: dict[str, Any] = {}
     else:
-        url = f"https://api.github.com/repos/{repo}/commits"
+        url = f"{repo_api_url()}/commits"
         params = {"per_page": limit}
         if branch:
             params["sha"] = branch
 
-    response = requests.get(url, headers=headers, params=params)
-    response.raise_for_status()
-    commits_raw = response.json()
+    commits_raw = get_json(url, params=params)
+    if isinstance(commits_raw, dict) and "error" in commits_raw:
+        return commits_raw
 
     commits = []
     for c in commits_raw[:limit]:
@@ -90,7 +84,6 @@ def list_commits(pr_number: int | None = None, branch: str | None = None, limit:
             "date": commit_info.get("author", {}).get("date"),
             "url": c.get("html_url"),
         })
-
     return commits
 def get_active_repository() -> dict[str, str]:
     return {"active_repository": active_repo_full_name()}

@@ -9,11 +9,8 @@ logging.basicConfig(stream=sys.stderr, level=logging.WARNING)
 import base64
 import os
 import re
-import time
-from datetime import datetime, timedelta
-from typing import Any
 import json
-import sys
+from typing import Any
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.google_genai import GoogleGenAI
 from llama_index.core import Settings, VectorStoreIndex
@@ -22,7 +19,14 @@ import chromadb
 from dotenv import load_dotenv
 import requests
 from mcp.server.fastmcp import FastMCP
-from requests.auth import HTTPBasicAuth
+from llamaindex_pipeline import configu
+from tools.github_tools import (
+    list_repository_tree as github_list_repository_tree,
+    list_commits as github_list_commits,
+)
+from tools.ttl_cache import TTLCache
+
+_search_code_cache = TTLCache(ttl_seconds=300)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 OWNER = os.getenv("REPO_OWNER")
@@ -31,28 +35,6 @@ API_URL = f"https://api.github.com/repos/{OWNER}/{REPO}"
 TIMEOUT_SECONDS = 20
 RESOURCE_CACHE: dict[str, str] = {}
 
-from tools.github_tools import (
-    active_repo_full_name,
-    check_merge_conflicts as github_check_merge_conflicts,
-    create_branch as github_create_branch,
-    create_pull_request as github_create_pull_request,
-    detect_breaking_changes as github_detect_breaking_changes,
-    fetch_github_doc,
-    get_active_repository as github_get_active_repository,
-    get_ci_status as github_get_ci_status,
-    get_file_changes as github_get_file_changes,
-    get_pr_metadata as github_get_pr_metadata,
-    guide_contributor as github_guide_contributor,
-    list_pr_comments as github_list_pr_comments,
-    list_pr_files as github_list_pr_files,
-    list_pr_reviews as github_list_pr_reviews,
-    list_repository_tree as github_list_repository_tree,
-    post_pr_comment as github_post_pr_comment,
-    set_active_repository as github_set_active_repository,
-    upsert_file as github_upsert_file,
-    list_prs,
-    list_commits,
-)
 mcp = FastMCP(
     "SmartStage MCP",
     instructions=(
@@ -121,20 +103,6 @@ def _get_json(url: str, *, params: dict[str, Any] | None = None) -> Any:
         return {"error": "invalid_github_response"}
 
 
-def _paginated(url: str) -> list[Any] | dict[str, Any]:
-    items: list[Any] = []
-    for page in range(1, 11):
-        data = _get_json(url, params={"per_page": 100, "page": page})
-        if isinstance(data, dict) and "error" in data:
-            return data
-        if not isinstance(data, list):
-            return {"error": "unexpected_github_response", "detail": data}
-        items.extend(data)
-        if len(data) < 100:
-            break
-    return items
-
-
 def fetch_github_doc(filepath: str) -> str:
     """Télécharge un fichier Markdown du dépôt GitHub, avec cache mémoire."""
     if filepath in RESOURCE_CACHE:
@@ -152,175 +120,62 @@ def fetch_github_doc(filepath: str) -> str:
     return content
 
 
-def _extract_markdown_section(content: str, query: str) -> str | None:
-    """Extrait la section Markdown (titre ## à ####) dont le titre correspond le mieux à `query`."""
-    lines = content.splitlines()
-    headers: list[tuple[int, int, str]] = []
-    for index, line in enumerate(lines):
-        match = re.match(r"^(#{2,4})\s+(.*)", line)
-        if match:
-            headers.append((index, len(match.group(1)), match.group(2).strip()))
-    if not headers:
-        return None
-    query_lower = query.lower()
-    match_position = next((pos for pos, (_, _, title) in enumerate(headers) if query_lower in title.lower()), None)
-    if match_position is None:
-        return None
-    start_line, start_level, _ = headers[match_position]
-    end_line = len(lines)
-    for line_index, level, _ in headers[match_position + 1:]:
-        if level <= start_level:
-            end_line = line_index
-            break
-    return "\n".join(lines[start_line:end_line]).strip()
+@mcp.tool()
 
-
-def _grep_markdown(content: str, keyword: str, context: int = 2) -> list[str]:
-    """Retourne les extraits de `content` contenant `keyword`, avec quelques lignes de contexte."""
-    lines = content.splitlines()
-    keyword_lower = keyword.lower()
-    snippets: list[str] = []
-    for index, line in enumerate(lines):
-        if keyword_lower in line.lower():
-            start = max(0, index - context)
-            end = min(len(lines), index + context + 1)
-            snippets.append("\n".join(lines[start:end]))
-    return snippets
-
-
-def _parse_markdown_table(content: str) -> list[dict[str, str]] | None:
-    """Convertit la première table Markdown trouvée dans `content` en liste de dictionnaires."""
-    table_lines = [line for line in content.splitlines() if line.strip().startswith("|")]
-    if len(table_lines) < 2:
-        return None
-    header = [cell.strip() for cell in table_lines[0].strip("|").split("|")]
-    rows: list[dict[str, str]] = []
-    for line in table_lines[2:]:
-        cells = [cell.strip() for cell in line.strip("|").split("|")]
-        if len(cells) != len(header):
-            continue
-        rows.append(dict(zip(header, cells)))
-    return rows or None
-
-
-def _lookup_markdown(content: str, query: str) -> dict[str, Any] | None:
-    """Cherche `query` dans `content` : d'abord comme titre de section, puis comme ligne
-    de table (n'importe quelle colonne), puis en dernier recours par simple grep avec contexte.
-    Renvoie None si rien ne correspond.
+def list_commits(
+    pr_number: int | None = None,
+    branch: str | None = None,
+    limit: int = 10,
+) -> list[dict]:
     """
-    section = _extract_markdown_section(content, query)
-    if section:
-        return {"match_type": "section", "content": section}
-    table = _parse_markdown_table(content)
-    if table:
-        query_lower = query.lower()
-        rows = [row for row in table if any(query_lower in str(value).lower() for value in row.values())]
-        if rows:
-            return {"match_type": "table_rows", "rows": rows}
-    snippets = _grep_markdown(content, query)
-    if snippets:
-        return {"match_type": "snippets", "matches": snippets}
-    return None
+    Liste les commits effectués sur le dépôt actif.
+
+    Args:
+        pr_number: si fourni, liste uniquement les commits de cette PR.
+        branch: si fourni (et pr_number absent), liste les commits de cette branche.
+        limit: nombre max de commits à retourner (défaut 10).
+    """
+    return github_list_commits(pr_number=pr_number, branch=branch, limit=limit)
 
 
-def _parse_commit(commit_data: dict[str, Any]) -> dict[str, Any]:
-    """Normalise un objet commit GitHub en champs simples : qui, quand, quoi."""
-    commit = commit_data.get("commit", {})
-    author_info = commit.get("author", {})
-    author_login = (commit_data.get("author") or {}).get("login")
-    return {
-        "sha": commit_data.get("sha", "")[:10],
-        "author": author_login or author_info.get("name") or "inconnu",
-        "date": author_info.get("date"),
-        "message": (commit.get("message") or "").split("\n")[0],
-        "url": commit_data.get("html_url"),
-    }
-
-# Tool de RAG:
-sys.path.append(os.path.join(os.path.dirname(__file__),"llamaindex_pipeline"))
-import configu
-
-# Configurer les modèles (embedding + LLM)
+# --- Tool de RAG ---
+sys.path.append(os.path.join(os.path.dirname(__file__), "llamaindex_pipeline"))
 Settings.embed_model = HuggingFaceEmbedding(model_name=configu.EMBED_MODEL_NAME)
 Settings.llm = GoogleGenAI(model=configu.LLM_MODEL_NAME, api_key=configu.GEMINI_API_KEY)
 
-# Charger l'index depuis ChromaDB (base synchronisée via chroma-index)
 chroma_client = chromadb.PersistentClient(path=configu.STORAGE_DIR)
 chroma_collection = chroma_client.get_or_create_collection(configu.CHROMA_COLLECTION_NAME)
 vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
 index = VectorStoreIndex.from_vector_store(vector_store)
 
-# Créer le query_engine (utilisé pour les questions "explicatives" / synthèse en langage naturel)
 query_engine = index.as_query_engine(similarity_top_k=5)
-_code_retriever = index.as_retriever(similarity_top_k=5)
-
-
-def _rag_retriever(question: str) -> list[dict[str, Any]]:
-    """Adapte le retriever LlamaIndex au format attendu par context_builder.py."""
-    nodes = _code_retriever.retrieve(question)
-    return [
-        {
-            "text": node.get_content(),
-            "source": node.node.metadata.get("file_path", "code_chunk"),
-            "score": node.score or 0.0,
-        }
-        for node in nodes
-    ]
-
-
-# --- Détection "l'utilisateur veut le code brut, pas un résumé" ---
-# Le query_engine ci-dessus fait toujours passer les chunks récupérés par le LLM,
-# qui reformule/synthétise -> c'est ce qui "avale" le contenu exact (ex: salma_test
-# absent d'un résumé, alors qu'il est bien dans les chunks récupérés).
-# Pour répondre "donne-moi le code", on doit contourner la synthèse LLM et renvoyer
-# directement le texte brut des noeuds récupérés par le retriever.
-RAW_CODE_REQUEST_PATTERN = re.compile(
-    r"(contenu\s+(complet|exact)|code\s+(source|brut|exact)|"
-    r"fichier\s+(complet|entier)|ligne\s+par\s+ligne|donne[\s-]*moi\s+le\s+code|"
-    r"texte\s+brut|verbatim|raw\s+content)",
-    re.IGNORECASE,
-)
-
-# Nombre de chunks à renvoyer bruts quand on détecte une demande de code exact.
-# Un peu plus élevé que similarity_top_k du query_engine (5) car ici on ne filtre
-# plus par pertinence "sémantique agrégée" : on veut couvrir le fichier visé.
-RAW_CODE_TOP_K = 8
-
-
-def _extraire_chemin_fichier(question: str) -> str | None:
-    """Essaie d'extraire un chemin/nom de fichier explicite de la question
-    (ex: 'Admin.cpp', 'src/view/MenuAdmin.java') pour filtrer les noeuds bruts
-    sur ce fichier précis plutôt que de tout renvoyer."""
-    match = re.search(r"[\w./+-]+\.(cpp|h|hpp|java|py|php|js|ts|sql)\b", question, re.IGNORECASE)
-    return match.group(0) if match else None
-
 
 
 
 @mcp.tool()
+
 async def search_code(question: str) -> str:
     """Recherche dans le code indexé. Retrouve les extraits les plus pertinents
     par similarité sémantique, récupère aussi les chunks voisins (même fichier)
     pour éviter de couper une fonction, puis demande au LLM de restituer le code
     exact trouvé (jamais un résumé/paraphrase) et de répondre clairement si la
     fonction demandée n'existe pas dans les extraits."""
-    # Tentative 1 : recherche sémantique standard
+    cached = _search_code_cache.get(question)
+    if cached is not None:
+        return cached
+
     retriever = index.as_retriever(similarity_top_k=6)
     nodes = await retriever.aretrieve(question)
-    
-        # Tentative 2 : si peu de résultats, élargit fortement (plus de candidats)
+
     if len(nodes) < 3:
         retriever_large = index.as_retriever(similarity_top_k=20)
         nodes = await retriever_large.aretrieve(question)
-    
-        # Tentative 3 : recherche par mot-clé brut sur TOUS les documents indexés
-        # (filet de sécurité si même la recherche élargie échoue)
+
     mots_cles = [m for m in re.findall(r"\w+", question) if len(m) > 3]
     if mots_cles:
         tous_docs = chroma_collection.get(include=["documents", "metadatas"])
         for doc_text, meta in zip(tous_docs["documents"], tous_docs["metadatas"]):
             if any(mot.lower() in doc_text.lower() for mot in mots_cles):
-                    # Ajoute ce chunk s'il n'est pas déjà dans nos résultats
                 deja_present = any(
                     (n.node.metadata or {}).get("file_path") == meta.get("file_path")
                     for n in nodes
@@ -334,11 +189,9 @@ async def search_code(question: str) -> str:
                                 "node_id": f"{metadata.get('file_path')}::keyword"
                             })()
                     nodes.append(FakeNode(doc_text, meta))
-    
+
     if not nodes:
         return "Aucun résultat trouvé dans l'index pour cette question, même après recherche élargie."
-
-
 
     fichiers_vus = set()
     blocs = []
@@ -352,8 +205,6 @@ async def search_code(question: str) -> str:
             continue
         fichiers_vus.add(file_path)
 
-        # Récupère aussi le chunk précédent et suivant du même fichier,
-        # pour éviter de couper une fonction en plein milieu
         chunk_index = None
         if "::" in node_id:
             try:
@@ -371,7 +222,7 @@ async def search_code(question: str) -> str:
                     else:
                         textes.append(voisin["documents"][0])
 
-        blocs.append(f"--- {file_path} ---\n" + "\n".join(textes))
+        blocs.append(f" {file_path} \n" + "\n".join(textes))
 
     contexte = "\n\n".join(blocs)
 
@@ -395,17 +246,23 @@ async def search_code(question: str) -> str:
     )
 
     response = await Settings.llm.acomplete(prompt)
-    return str(response)
+    result = str(response)
+    _search_code_cache.set(question, result)
+    return result
+
 
 @mcp.tool()
+
 def list_repository_tree(ref: str = "main", path_prefix: str = "") -> list[dict[str, Any]] | dict[str, Any]:
     """Liste l'arborescence GitHub du depot actif."""
     return github_list_repository_tree(ref, path_prefix)
 
-# Code agent TOOLS:
+
 DOC_KEYWORDS = ["readme", "architecture", "cahier", "charge", "spec", "guideline", "convention", "structure"]
 
+
 @mcp.tool()
+
 def explore_repo_structure(ref: str = "main") -> dict[str, Any]:
     """Returns the full file tree of the repository, with likely documentation/
     architecture/cahier-des-charges files flagged separately for quick access.
@@ -433,7 +290,9 @@ def explore_repo_structure(ref: str = "main") -> dict[str, Any]:
         ),
     }
 
+
 @mcp.tool()
+
 def read_repo_file(filepath: str, ref: str = "main") -> str:
     """Reads the raw content of a file from the repository at a given ref
     (branch/commit). Use this to read README.md, architecture docs, cahier
@@ -449,7 +308,9 @@ def read_repo_file(filepath: str, ref: str = "main") -> str:
     except (ValueError, UnicodeDecodeError) as exc:
         return f"Could not decode {filepath}: {exc}"
 
+
 @mcp.tool()
+
 def create_branch_and_commit_code(
     branch_name: str,
     filepath: str,
@@ -461,7 +322,7 @@ def create_branch_and_commit_code(
     THIS NEVER WRITES TO main DIRECTLY — it always creates a separate branch
     first.
 
-    ⚠️ DO NOT CALL THIS TOOL until you have already:
+     DO NOT CALL THIS TOOL until you have already:
     1. Called explore_repo_structure and read_repo_file on the project's
        documentation (README, architecture, cahier des charges).
     2. Explicitly confirmed the requested feature is within the documented
@@ -480,7 +341,6 @@ def create_branch_and_commit_code(
     token = os.getenv("GITHUB_TOKEN_AGENT")
     headers = {"Accept": "application/vnd.github+json", "Authorization": f"Bearer {token}"}
 
-    # Does the branch already exist?
     branch_check = requests.get(f"{API_URL}/git/refs/heads/{branch_name}", headers=headers)
 
     if branch_check.status_code == 404:
@@ -497,7 +357,6 @@ def create_branch_and_commit_code(
         if not create_resp.ok:
             return {"error": "branch_creation_failed", "detail": create_resp.json()}
 
-    # Does the file already exist on this branch (need sha to update)?
     existing = requests.get(
         f"{API_URL}/contents/{filepath}", headers=headers, params={"ref": branch_name}
     )
@@ -522,6 +381,7 @@ def create_branch_and_commit_code(
 
 
 @mcp.tool()
+
 def open_pull_request(
     branch_name: str,
     title: str,
@@ -553,14 +413,14 @@ def open_pull_request(
         "pr_url": data.get("html_url"),
         "pr_number": data.get("number"),
     }
+
+
 @mcp.tool()
+
 async def generate_implementation_plan(user_request: str, project_context: str) -> str:
     """Analyse la demande utilisateur face au contexte du projet et décide s'il
     peut l'implémenter directement, ou s'il doit d'abord clarifier certains
-    points avec l'utilisateur. Se comporte comme un architecte logiciel senior :
-    il identifie lui-même les zones d'incertitude (pas de liste prédéfinie),
-    qu'il s'agisse du langage, du style architectural, des conventions de code,
-    de la structure de dossiers, ou de tout autre choix structurant."""
+    points avec l'utilisateur."""
     prompt = (
         "Tu es un architecte logiciel senior qui rejoint un projet existant "
         "(ou en démarre un nouveau si le contexte est vide). Avant d'écrire du "
@@ -574,21 +434,17 @@ async def generate_implementation_plan(user_request: str, project_context: str) 
         "Ta démarche :\n"
         "1. Identifie TOI-MÊME, au cas par cas, quelles décisions structurantes "
         "sont nécessaires pour cette demande précise. Cela peut concerner "
-        "(liste non exhaustive, n'en écarte ni n'en ajoute aucune par défaut) : "
-        "le langage/framework, le style architectural (MVC, hexagonal, "
-        "microservices, monolithe, feature-based, layered...), les conventions "
-        "de nommage et de style de code, l'organisation des dossiers, les "
-        "patterns de gestion d'erreurs, les choix de tests, ou toute autre "
-        "convention spécifique à ce projet.\n"
+        "(liste non exhaustive) : le langage/framework, le style architectural "
+        "(MVC, hexagonal, microservices, monolithe, feature-based, layered...), "
+        "les conventions de nommage et de style de code, l'organisation des "
+        "dossiers, les patterns de gestion d'erreurs, les choix de tests, ou "
+        "toute autre convention spécifique à ce projet.\n"
         "2. Si le contexte fourni répond DÉJÀ clairement à ces questions "
         "(explicitement ou par déduction forte du code/doc existant), "
         "n'en repose AUCUNE — utilise directement ces conventions.\n"
         "3. Ne pose des questions QUE sur les points réellement ambigus ou "
-        "manquants pour CETTE demande précise. Ne pose jamais une question "
-        "générique 'quel framework veux-tu' si le contexte le montre déjà, et "
-        "ne pose jamais de questions hors sujet par rapport à la demande.\n"
-        "4. Si tu as suffisamment d'éléments (contexte existant OU demande "
-        "elle-même suffisamment précise), procède directement à la génération.\n\n"
+        "manquants pour CETTE demande précise.\n"
+        "4. Si tu as suffisamment d'éléments, procède directement à la génération.\n\n"
         "Réponds UNIQUEMENT avec un JSON valide, sans aucun texte autour :\n"
         "{\n"
         '  "scope_ok": true ou false,\n'
@@ -618,7 +474,7 @@ async def generate_implementation_plan(user_request: str, project_context: str) 
             "questions": [
                 "Je n'ai pas réussi à générer un plan structuré valide. "
                 "Peux-tu reformuler ta demande de façon plus précise ?"
-            ],#comment
+            ],
             "branch_name": "", "commit_message": "", "pr_title": "",
             "pr_description": "", "files": [],
         })
@@ -627,11 +483,11 @@ async def generate_implementation_plan(user_request: str, project_context: str) 
 
 
 @mcp.tool()
+
 def save_project_conventions(new_conventions: str, branch: str = "main") -> dict[str, Any]:
     """Ajoute ou met à jour des conventions de projet (architecture, style de
     code, structure) dans CONVENTIONS.md à la racine du repo, pour que les
-    futures demandes n'aient plus besoin de reposer ces questions. Fusionne
-    avec le contenu existant plutôt que de l'écraser."""
+    futures demandes n'aient plus besoin de reposer ces questions."""
     existing = fetch_github_doc("CONVENTIONS.md")
     if existing.startswith("# Erreur"):
         existing = "# Conventions du projet\n\n"
@@ -658,12 +514,5 @@ def save_project_conventions(new_conventions: str, branch: str = "main") -> dict
 
 
 
-# Enregistre les 3 outils MCP de la couche d'optimisation
-# (token_usage_report, explain_token_usage, optimize_context) sur cette
-# même instance `mcp`. Importé en dernier pour que mcp/index/Settings
-# soient déjà initialisés. Ne crée pas de nouveau serveur.
-import optimization_tools  # noqa: E402,F401
-
-
 if __name__ == "__main__":
-    mcp.run(transport="stdio")#comment 
+    mcp.run(transport="stdio")

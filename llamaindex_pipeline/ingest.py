@@ -81,7 +81,6 @@ storage_context = StorageContext.from_defaults(vector_store=vector_store)
 
 chroma_client = chromadb.PersistentClient(path=configu.STORAGE_DIR)
 
-# Supprime l'ancienne collection si elle existe, pour repartir propre
 try:
     chroma_client.delete_collection(configu.CHROMA_COLLECTION_NAME)
     print(f"Ancienne collection '{configu.CHROMA_COLLECTION_NAME}' supprimée.")
